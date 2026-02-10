@@ -186,6 +186,65 @@ class PageOperations:
         # In Notion API, archiving is the delete operation
         self.archive(page_id)
 
+    def move(
+        self,
+        page_id: str,
+        *,
+        parent_id: str,
+        parent_type: Literal["data_source", "page"] = "data_source",
+    ) -> Page:
+        """
+        Move a page to a new parent (page or data source).
+
+        Uses the Notion Move Page API (POST /v1/pages/{page_id}/move).
+        Requires Notion-Version 2025-09-03 or later.
+
+        Args:
+            page_id: The page to move.
+            parent_id: The new parent ID.
+            parent_type: Either "data_source" (for databases) or "page".
+
+        Returns:
+            The moved Page object.
+        """
+        import httpx
+
+        page_id = self._extract_id(page_id)
+        parent_id_clean = self._extract_id(parent_id)
+
+        token = getattr(self._client._notion.options, "auth", "")
+        if not token:
+            import os
+            token = os.environ.get("NOTION_API_KEY") or os.environ.get("NOTION_TOKEN", "")
+
+        parent_key = "data_source_id" if parent_type == "data_source" else "page_id"
+
+        try:
+            resp = httpx.post(
+                f"https://api.notion.com/v1/pages/{page_id}/move",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Notion-Version": "2025-09-03",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "parent": {
+                        "type": parent_key,
+                        parent_key: parent_id_clean,
+                    }
+                },
+                timeout=30.0,
+            )
+            resp.raise_for_status()
+            return Page.from_api_response(resp.json())
+        except httpx.HTTPStatusError as e:
+            body = e.response.text
+            if "object_not_found" in body.lower():
+                raise NotFoundError("Page", page_id) from e
+            raise NotionOpsError(f"Failed to move page: {e} — {body}") from e
+        except Exception as e:
+            raise NotionOpsError(f"Failed to move page: {e}") from e
+
     def get_property(self, page_id: str, property_id: str) -> Any:
         """
         Retrieve a specific property value from a page.

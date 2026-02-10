@@ -40,6 +40,12 @@ class BlockType(str, Enum):
     EQUATION = "equation"
     CHILD_PAGE = "child_page"
     CHILD_DATABASE = "child_database"
+    UNSUPPORTED = "unsupported"
+
+    @classmethod
+    def _missing_(cls, value: object) -> "BlockType | None":
+        """Handle unknown block types from the API gracefully."""
+        return cls.UNSUPPORTED
 
 
 class Block(BaseModel):

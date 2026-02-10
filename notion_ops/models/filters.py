@@ -426,6 +426,40 @@ class Filter:
         return PropertyFilter(name).files()
 
 
+class NamedFilters:
+    """Pre-built filters for common AgenticOS queries."""
+
+    INBOX_PROJECT_ID = "REDACTED-PRIVATE-PROJECT-ID"
+
+    @classmethod
+    def free_radicals(cls, inbox_id: str | None = None) -> dict[str, Any]:
+        """Atoms with no meaningful relationships — unbound, unlinked, nobody watching.
+
+        Matches atoms where:
+        - Subscribers is empty
+        - Project is empty OR Project contains Agentic Inbox
+        - Action Item is empty
+        - Meta is empty
+        - Mesa is empty
+        - Parent is empty
+
+        Args:
+            inbox_id: Override the Agentic Inbox project ID.
+        """
+        _inbox = inbox_id or cls.INBOX_PROJECT_ID
+        return Filter.and_(
+            Filter.relation("Subscribers").is_empty(),
+            Filter.or_(
+                Filter.relation("Project").is_empty(),
+                Filter.relation("Project").contains(_inbox),
+            ),
+            Filter.relation("Action Item").is_empty(),
+            Filter.relation("Meta").is_empty(),
+            Filter.relation("Mesa").is_empty(),
+            Filter.relation("Parent").is_empty(),
+        )
+
+
 class Sort:
     """Sort specification for queries."""
 

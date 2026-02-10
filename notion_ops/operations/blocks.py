@@ -1,12 +1,25 @@
 """Block CRUD operations for Notion Operations library."""
 
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from notion_ops.exceptions import NotFoundError, NotionOpsError
-from notion_ops.models.block import Block
+from notion_ops.models.block import Block, BlockType
 
 if TYPE_CHECKING:
     from notion_ops.client import NotionOps
+
+
+@dataclass
+class ChildPageInfo:
+    """Summary of a child page found under a parent block/page."""
+
+    id: str
+    title: str
+    has_children: bool = False
+    plain_text: str = ""
+    block_count: int = 0
+    block_types: list[str] = field(default_factory=list)
 
 
 class BlockOperations:
@@ -226,6 +239,118 @@ class BlockOperations:
             if "object_not_found" in str(e).lower():
                 raise NotFoundError("Block", block_id) from e
             raise NotionOpsError(f"Failed to archive block: {e}") from e
+
+    def get_child_pages(
+        self,
+        parent_id: str,
+        *,
+        include_content: bool = False,
+        max_content_blocks: int = 50,
+    ) -> list[ChildPageInfo]:
+        """
+        List child pages under a parent block or page.
+
+        Returns structured info about each child page, optionally
+        including their plain-text content.
+
+        Args:
+            parent_id: The parent page or block ID.
+            include_content: If True, fetch each child page's blocks
+                and extract plain text.
+            max_content_blocks: Max blocks to read per child page
+                when include_content is True.
+
+        Returns:
+            List of ChildPageInfo objects.
+        """
+        parent_id = self._extract_id(parent_id)
+        child_pages: list[ChildPageInfo] = []
+
+        # Paginate through all children to find child_page blocks
+        start_cursor: str | None = None
+        while True:
+            params: dict[str, Any] = {"block_id": parent_id, "page_size": 100}
+            if start_cursor:
+                params["start_cursor"] = start_cursor
+
+            try:
+                response = self._client._notion.blocks.children.list(**params)
+            except Exception as e:
+                raise NotionOpsError(f"Failed to list children: {e}") from e
+
+            for block_data in response.get("results", []):
+                if block_data.get("type") != "child_page":
+                    continue
+
+                page_id = block_data["id"]
+                title = block_data.get("child_page", {}).get("title", "")
+                has_children = block_data.get("has_children", False)
+
+                info = ChildPageInfo(
+                    id=page_id,
+                    title=title,
+                    has_children=has_children,
+                )
+
+                if include_content:
+                    info = self._read_child_page_content(
+                        info, max_blocks=max_content_blocks
+                    )
+
+                child_pages.append(info)
+
+            if not response.get("has_more"):
+                break
+            start_cursor = response.get("next_cursor")
+
+        return child_pages
+
+    def _read_child_page_content(
+        self, info: ChildPageInfo, *, max_blocks: int = 50
+    ) -> ChildPageInfo:
+        """Read a child page's blocks and populate plain_text summary."""
+        try:
+            response = self._client._notion.blocks.children.list(
+                block_id=info.id, page_size=min(max_blocks, 100)
+            )
+        except Exception as e:
+            info.plain_text = f"[error reading content: {e}]"
+            return info
+
+        lines: list[str] = []
+        block_types: list[str] = []
+
+        for block_data in response.get("results", []):
+            btype = block_data.get("type", "unknown")
+            block_types.append(btype)
+
+            content = block_data.get(btype, {})
+            if not isinstance(content, dict):
+                continue
+
+            # Extract text from rich_text arrays
+            rich_texts = content.get("rich_text", [])
+            text = "".join(rt.get("plain_text", "") for rt in rich_texts)
+
+            # Special cases
+            if not text and btype == "child_page":
+                text = f"[child page: {content.get('title', '')}]"
+            elif not text and btype == "child_database":
+                text = f"[child database: {content.get('title', '')}]"
+            elif not text and btype == "image":
+                caption = content.get("caption", [])
+                cap_text = "".join(rt.get("plain_text", "") for rt in caption)
+                text = f"[image{': ' + cap_text if cap_text else ''}]"
+            elif not text and btype == "bookmark":
+                text = f"[bookmark: {content.get('url', '')}]"
+
+            if text:
+                lines.append(text)
+
+        info.plain_text = "\n".join(lines)
+        info.block_count = len(block_types)
+        info.block_types = block_types
+        return info
 
     def _extract_id(self, id_or_url: str) -> str:
         """Extract block ID from URL or return as-is."""
