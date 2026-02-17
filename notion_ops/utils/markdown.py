@@ -498,7 +498,6 @@ def create_atom_page(
         SelectProperty,
         RichTextProperty,
         RelationProperty,
-        StatusProperty,
     )
 
     # Build properties
@@ -524,7 +523,8 @@ def create_atom_page(
         properties['Project'] = RelationProperty(value=[project_id])
 
     if status:
-        properties['Status'] = StatusProperty(value=status)
+        # Atoms DB defines Status as 'select', not 'status' type
+        properties['Status'] = SelectProperty(value=status)
 
     if meta:
         properties['Meta'] = RelationProperty(value=meta)

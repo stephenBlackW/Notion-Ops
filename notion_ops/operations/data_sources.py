@@ -76,22 +76,29 @@ class DataSourceOperations:
         """
         data_source_id = self._extract_id(data_source_id)
 
-        query_params: dict[str, Any] = {
-            "database_id": data_source_id,
+        body: dict[str, Any] = {
             "page_size": min(page_size, 100),
         }
 
         if filter:
-            query_params["filter"] = filter
+            body["filter"] = filter
 
         if sorts:
-            query_params["sorts"] = sorts
+            body["sorts"] = sorts
 
         if start_cursor:
-            query_params["start_cursor"] = start_cursor
+            body["start_cursor"] = start_cursor
 
         try:
-            response = self._client._notion.data_sources.query(**query_params)
+            # Use raw request — the SDK's databases.query() doesn't exist and
+            # data_sources.query() has signature mismatches. The REST API at
+            # /databases/{id}/query works reliably for both database and
+            # data source IDs.
+            response = self._client._notion.request(
+                path=f"databases/{data_source_id}/query",
+                method="POST",
+                body=body,
+            )
             return QueryResult.from_api_response(response, Page)
         except Exception as e:
             if "object_not_found" in str(e).lower():
