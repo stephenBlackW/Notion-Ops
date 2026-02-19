@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 
 from notion_ops.models.block import Blocks, Block, BlockType
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_inline_formatting(text: str) -> list[dict[str, Any]]:
@@ -474,7 +477,15 @@ def create_atom_page(
         atoms_db_id: Atoms database ID (defaults to AgenticOS Atoms)
 
     Returns:
-        Dict with 'page_id' and 'url' of created page
+        Dict with keys:
+            - 'page_id': Notion page ID of the created page
+            - 'id': Backward-compatible alias for 'page_id'
+            - 'url': Notion URL of the created page
+            - 'title': Title of the created page
+            - 'content_error': None if content was appended successfully,
+              or an error string if block append failed. The page still exists
+              in Notion even when this is set — the caller should NOT retry
+              page creation.
 
     Example:
         from notion_ops import NotionOps
@@ -536,21 +547,37 @@ def create_atom_page(
         parent_type="database"
     )
 
-    # Convert markdown to blocks (returns dicts in API format)
-    blocks = markdown_to_blocks(content_markdown)
-
-    # Append in batches (Notion limit ~100 blocks per request)
-    # Use raw API since markdown_to_blocks returns dicts, not Block objects
-    batch_size = 100
-    for i in range(0, len(blocks), batch_size):
-        batch = blocks[i:i + batch_size]
-        notion_client._notion.blocks.children.append(
-            block_id=page.id,
-            children=batch
-        )
-
+    # Page created successfully — build result immediately so callers always
+    # get the page_id even if the subsequent block append fails (ISS-006).
     page_id_clean = page.id.replace('-', '')
-    return {
+    result: dict[str, Any] = {
         'page_id': page.id,
+        'id': page.id,  # backward-compatible alias
         'url': f"https://notion.so/{page_id_clean}",
+        'title': title,
+        'content_error': None,
     }
+
+    # Attempt to append content blocks — failure is non-fatal
+    if content_markdown:
+        try:
+            # Convert markdown to blocks (returns dicts in API format)
+            blocks = markdown_to_blocks(content_markdown)
+
+            # Append in batches (Notion limit ~100 blocks per request)
+            # Use raw API since markdown_to_blocks returns dicts, not Block objects
+            batch_size = 100
+            for i in range(0, len(blocks), batch_size):
+                batch = blocks[i:i + batch_size]
+                notion_client._notion.blocks.children.append(
+                    block_id=page.id,
+                    children=batch
+                )
+        except Exception as e:
+            result['content_error'] = str(e)
+            logger.warning(
+                "Failed to append content blocks to page %s (%s): %s",
+                page.id, title, e,
+            )
+
+    return result
