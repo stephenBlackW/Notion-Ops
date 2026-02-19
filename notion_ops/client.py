@@ -8,8 +8,8 @@ from notion_client import AsyncClient, Client
 from notion_ops.exceptions import AuthenticationError
 from notion_ops.models.page import Page
 from notion_ops.operations.blocks import BlockOperations
-from notion_ops.operations.databases import DatabaseOperations
 from notion_ops.operations.data_sources import DataSourceOperations
+from notion_ops.operations.databases import DatabaseOperations
 from notion_ops.operations.pages import PageOperations
 from notion_ops.operations.users import UserOperations
 
@@ -47,7 +47,7 @@ class NotionOps:
         self,
         auth: str | None = None,
         timeout: int = 60000,
-        notion_version: str = "2022-06-28",
+        notion_version: str = "2025-09-03",
     ):
         """
         Initialize the Notion Operations client.
@@ -151,7 +151,7 @@ class AsyncNotionOps:
         self,
         auth: str | None = None,
         timeout: int = 60000,
-        notion_version: str = "2022-06-28",
+        notion_version: str = "2025-09-03",
     ):
         """
         Initialize the async Notion Operations client.

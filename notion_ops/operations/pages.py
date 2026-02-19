@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from notion_client import APIResponseError
 
-from notion_ops.exceptions import NotFoundError, NotionOpsError, map_api_error
+from notion_ops.exceptions import NotionOpsError, map_api_error
 from notion_ops.models.block import Block
 from notion_ops.models.page import Page, PageCreate, PageUpdate
 from notion_ops.models.properties import PropertyValue
@@ -208,8 +208,8 @@ class PageOperations:
         """
         Move a page to a new parent (page or data source).
 
-        Uses the Notion Move Page API (POST /v1/pages/{page_id}/move).
-        Requires Notion-Version 2025-09-03 or later.
+        Uses the SDK's native pages.move() endpoint
+        (POST /v1/pages/{page_id}/move).
 
         Args:
             page_id: The page to move.
@@ -219,58 +219,22 @@ class PageOperations:
         Returns:
             The moved Page object.
         """
-        import httpx
-
         page_id = self._extract_id(page_id)
         parent_id_clean = self._extract_id(parent_id)
-
-        token = getattr(self._client._notion.options, "auth", "")
-        if not token:
-            import os
-            token = os.environ.get("NOTION_API_KEY") or os.environ.get("NOTION_TOKEN", "")
 
         parent_key = "data_source_id" if parent_type == "data_source" else "page_id"
 
         try:
-            resp = httpx.post(
-                f"https://api.notion.com/v1/pages/{page_id}/move",
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Notion-Version": "2025-09-03",
-                    "Content-Type": "application/json",
+            response = self._client._notion.pages.move(
+                page_id=page_id,
+                parent={
+                    "type": parent_key,
+                    parent_key: parent_id_clean,
                 },
-                json={
-                    "parent": {
-                        "type": parent_key,
-                        parent_key: parent_id_clean,
-                    }
-                },
-                timeout=30.0,
             )
-            resp.raise_for_status()
-            return Page.from_api_response(resp.json())
-        except httpx.HTTPStatusError as e:
-            status = e.response.status_code
-            body = e.response.text
-            if status == 404:
-                raise NotFoundError("Page", page_id) from e
-            if status == 401:
-                from notion_ops.exceptions import AuthenticationError
-                raise AuthenticationError() from e
-            if status == 403:
-                from notion_ops.exceptions import PermissionError
-                raise PermissionError() from e
-            if status == 429:
-                from notion_ops.exceptions import RateLimitError
-                retry_after = 1.0
-                raw = e.response.headers.get("Retry-After")
-                if raw is not None:
-                    try:
-                        retry_after = float(raw)
-                    except (ValueError, TypeError):
-                        pass
-                raise RateLimitError(retry_after=retry_after) from e
-            raise NotionOpsError(f"Failed to move page: {e} — {body}") from e
+            return Page.from_api_response(response)
+        except APIResponseError as e:
+            raise map_api_error(e, resource_type="Page", resource_id=page_id) from e
         except Exception as e:
             raise NotionOpsError(f"Failed to move page: {e}") from e
 

@@ -1,7 +1,5 @@
 """Tests for PageOperations."""
 
-from unittest.mock import MagicMock, patch
-
 import pytest
 from notion_client.errors import APIErrorCode
 
@@ -235,11 +233,8 @@ class TestPageExtractId:
 class TestPageMove:
     """Tests for PageOperations.move."""
 
-    @patch("httpx.post")
-    def test_move_page(
-        self, mock_post, notion_ops_client, mock_page_response
-    ):
-        """Move page success path: posts to /pages/{id}/move."""
+    def test_move_page(self, notion_ops_client, mock_page_response):
+        """Move page success path: calls SDK pages.move with parent payload."""
         moved_response = mock_page_response(
             page_id="page-move-001",
             title="Moved Page",
@@ -247,14 +242,7 @@ class TestPageMove:
             parent_id="db-new-parent",
         )
 
-        mock_response = MagicMock()
-        mock_response.json.return_value = moved_response
-        mock_response.raise_for_status.return_value = None
-        mock_post.return_value = mock_response
-
-        # Set up the auth token on the mock client
-        notion_ops_client._notion.options = MagicMock()
-        notion_ops_client._notion.options.auth = "test-secret-key"
+        notion_ops_client._notion.pages.move.return_value = moved_response
 
         page = notion_ops_client.pages.move(
             "page-move-001",
@@ -265,12 +253,11 @@ class TestPageMove:
         assert isinstance(page, Page)
         assert page.id == "page-move-001"
 
-        # Verify httpx.post was called with correct URL and payload
-        mock_post.assert_called_once()
-        call_args = mock_post.call_args
-        assert "pagemove001/move" in call_args[0][0]
-        assert call_args[1]["json"]["parent"]["type"] == "data_source_id"
-        assert (
-            call_args[1]["json"]["parent"]["data_source_id"]
-            == "dbnewparent"
+        # Verify SDK pages.move was called with correct arguments
+        notion_ops_client._notion.pages.move.assert_called_once_with(
+            page_id="pagemove001",
+            parent={
+                "type": "data_source_id",
+                "data_source_id": "dbnewparent",
+            },
         )
