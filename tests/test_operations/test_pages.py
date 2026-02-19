@@ -234,9 +234,9 @@ class TestPageExtractId:
 class TestPageMove:
     """Tests for PageOperations.move."""
 
-    @patch("notion_ops.operations.pages.httpx")
+    @patch("httpx.post")
     def test_move_page(
-        self, mock_httpx, notion_ops_client, mock_page_response
+        self, mock_post, notion_ops_client, mock_page_response
     ):
         """Move page success path: posts to /pages/{id}/move."""
         moved_response = mock_page_response(
@@ -249,7 +249,7 @@ class TestPageMove:
         mock_response = MagicMock()
         mock_response.json.return_value = moved_response
         mock_response.raise_for_status.return_value = None
-        mock_httpx.post.return_value = mock_response
+        mock_post.return_value = mock_response
 
         # Set up the auth token on the mock client
         notion_ops_client._notion.options = MagicMock()
@@ -265,8 +265,8 @@ class TestPageMove:
         assert page.id == "page-move-001"
 
         # Verify httpx.post was called with correct URL and payload
-        mock_httpx.post.assert_called_once()
-        call_args = mock_httpx.post.call_args
+        mock_post.assert_called_once()
+        call_args = mock_post.call_args
         assert "pagemove001/move" in call_args[0][0]
         assert call_args[1]["json"]["parent"]["type"] == "data_source_id"
         assert (
