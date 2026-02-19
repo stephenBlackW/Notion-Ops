@@ -2,7 +2,9 @@
 
 from typing import TYPE_CHECKING, Any, Literal
 
-from notion_ops.exceptions import NotFoundError, NotionOpsError
+from notion_client import APIResponseError
+
+from notion_ops.exceptions import NotionOpsError, map_api_error
 from notion_ops.models.database import Database, DataSource
 from notion_ops.models.properties import PropertyDefinition
 from notion_ops.utils.retry import retry_on_transient
@@ -98,6 +100,10 @@ class DatabaseOperations:
         try:
             response = self._client._notion.databases.create(**create_data)
             return Database.from_api_response(response)
+        except APIResponseError as e:
+            raise map_api_error(
+                e, resource_type="Database", resource_id=parent_id
+            ) from e
         except Exception as e:
             raise NotionOpsError(f"Failed to create database: {e}") from e
 
@@ -117,9 +123,11 @@ class DatabaseOperations:
         try:
             response = self._client._notion.databases.retrieve(database_id=database_id)
             return Database.from_api_response(response)
+        except APIResponseError as e:
+            raise map_api_error(
+                e, resource_type="Database", resource_id=database_id
+            ) from e
         except Exception as e:
-            if "object_not_found" in str(e).lower():
-                raise NotFoundError("Database", database_id) from e
             raise NotionOpsError(f"Failed to retrieve database: {e}") from e
 
     @retry_on_transient
@@ -180,9 +188,11 @@ class DatabaseOperations:
                 **update_data,
             )
             return Database.from_api_response(response)
+        except APIResponseError as e:
+            raise map_api_error(
+                e, resource_type="Database", resource_id=database_id
+            ) from e
         except Exception as e:
-            if "object_not_found" in str(e).lower():
-                raise NotFoundError("Database", database_id) from e
             raise NotionOpsError(f"Failed to update database: {e}") from e
 
     @retry_on_transient
@@ -238,6 +248,10 @@ class DatabaseOperations:
                 archived=True,
             )
             return Database.from_api_response(response)
+        except APIResponseError as e:
+            raise map_api_error(
+                e, resource_type="Database", resource_id=database_id
+            ) from e
         except Exception as e:
             raise NotionOpsError(f"Failed to archive database: {e}") from e
 

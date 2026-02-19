@@ -1,6 +1,7 @@
 """Tests for DatabaseOperations."""
 
 import pytest
+from notion_client.errors import APIErrorCode
 
 from notion_ops.exceptions import NotFoundError, NotionOpsError
 from notion_ops.models.database import Database, DataSource
@@ -81,10 +82,10 @@ class TestDatabaseGet:
             database_id="dbget001"
         )
 
-    def test_get_database_not_found(self, notion_ops_client):
+    def test_get_database_not_found(self, notion_ops_client, make_api_error):
         """Get database with invalid ID raises NotFoundError."""
-        notion_ops_client._notion.databases.retrieve.side_effect = Exception(
-            "Could not find database. object_not_found"
+        notion_ops_client._notion.databases.retrieve.side_effect = make_api_error(
+            404, APIErrorCode.ObjectNotFound, "Could not find database."
         )
 
         with pytest.raises(NotFoundError) as exc_info:
@@ -135,10 +136,10 @@ class TestDatabaseUpdate:
         notion_ops_client._notion.databases.update.assert_not_called()
         notion_ops_client._notion.databases.retrieve.assert_called_once()
 
-    def test_update_database_not_found(self, notion_ops_client):
+    def test_update_database_not_found(self, notion_ops_client, make_api_error):
         """Update database with invalid ID raises NotFoundError."""
-        notion_ops_client._notion.databases.update.side_effect = Exception(
-            "object_not_found"
+        notion_ops_client._notion.databases.update.side_effect = make_api_error(
+            404, APIErrorCode.ObjectNotFound, "object_not_found"
         )
 
         with pytest.raises(NotFoundError) as exc_info:

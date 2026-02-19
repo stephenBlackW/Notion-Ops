@@ -1,6 +1,7 @@
 """Tests for UserOperations."""
 
 import pytest
+from notion_client.errors import APIErrorCode
 
 from notion_ops.exceptions import NotFoundError, NotionOpsError
 from notion_ops.operations.users import User
@@ -43,10 +44,10 @@ class TestUserGet:
         assert user.type == "bot"
         assert user.email is None  # Bots don't have email
 
-    def test_get_user_not_found(self, notion_ops_client):
+    def test_get_user_not_found(self, notion_ops_client, make_api_error):
         """Get user with invalid ID raises NotFoundError."""
-        notion_ops_client._notion.users.retrieve.side_effect = Exception(
-            "Could not find user. object_not_found"
+        notion_ops_client._notion.users.retrieve.side_effect = make_api_error(
+            404, APIErrorCode.ObjectNotFound, "Could not find user."
         )
 
         with pytest.raises(NotFoundError) as exc_info:

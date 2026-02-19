@@ -1,6 +1,7 @@
 """Tests for BlockOperations."""
 
 import pytest
+from notion_client.errors import APIErrorCode
 
 from notion_ops.exceptions import NotFoundError, NotionOpsError
 from notion_ops.models.block import Block, Blocks, BlockType
@@ -27,10 +28,10 @@ class TestBlockGet:
             block_id="blockget001"
         )
 
-    def test_get_block_not_found(self, notion_ops_client):
+    def test_get_block_not_found(self, notion_ops_client, make_api_error):
         """Get block with invalid ID raises NotFoundError."""
-        notion_ops_client._notion.blocks.retrieve.side_effect = Exception(
-            "Could not find block. object_not_found"
+        notion_ops_client._notion.blocks.retrieve.side_effect = make_api_error(
+            404, APIErrorCode.ObjectNotFound, "Could not find block."
         )
 
         with pytest.raises(NotFoundError) as exc_info:
@@ -148,10 +149,10 @@ class TestBlockGetChildren:
         assert len(blocks[0].children) == 1
         assert blocks[0].children[0].id == "nested-child"
 
-    def test_get_children_not_found(self, notion_ops_client):
+    def test_get_children_not_found(self, notion_ops_client, make_api_error):
         """Get children for missing block raises NotFoundError."""
-        notion_ops_client._notion.blocks.children.list.side_effect = Exception(
-            "object_not_found"
+        notion_ops_client._notion.blocks.children.list.side_effect = make_api_error(
+            404, APIErrorCode.ObjectNotFound, "object_not_found"
         )
 
         with pytest.raises(NotFoundError) as exc_info:
@@ -204,10 +205,10 @@ class TestBlockAppend:
         call_kwargs = notion_ops_client._notion.blocks.children.append.call_args.kwargs
         assert call_kwargs["after"] == "blockbefore001"
 
-    def test_append_blocks_not_found(self, notion_ops_client):
+    def test_append_blocks_not_found(self, notion_ops_client, make_api_error):
         """Append to missing parent raises NotFoundError."""
-        notion_ops_client._notion.blocks.children.append.side_effect = Exception(
-            "object_not_found"
+        notion_ops_client._notion.blocks.children.append.side_effect = make_api_error(
+            404, APIErrorCode.ObjectNotFound, "object_not_found"
         )
 
         with pytest.raises(NotFoundError):
@@ -249,7 +250,9 @@ class TestBlockUpdate:
         assert call_kwargs["block_id"] == "blockupd001"
         assert "paragraph" in call_kwargs
 
-    def test_update_block_not_found(self, notion_ops_client, mock_block_response):
+    def test_update_block_not_found(
+        self, notion_ops_client, mock_block_response, make_api_error
+    ):
         """Update block with not-found on update step raises NotFoundError."""
         existing_block = mock_block_response(
             block_id="block-upd-nf",
@@ -257,8 +260,8 @@ class TestBlockUpdate:
             text="Exists",
         )
         notion_ops_client._notion.blocks.retrieve.return_value = existing_block
-        notion_ops_client._notion.blocks.update.side_effect = Exception(
-            "object_not_found"
+        notion_ops_client._notion.blocks.update.side_effect = make_api_error(
+            404, APIErrorCode.ObjectNotFound, "object_not_found"
         )
 
         with pytest.raises(NotFoundError):
@@ -281,10 +284,10 @@ class TestBlockDelete:
             block_id="blockdel001"
         )
 
-    def test_delete_block_not_found(self, notion_ops_client):
+    def test_delete_block_not_found(self, notion_ops_client, make_api_error):
         """Delete block with invalid ID raises NotFoundError."""
-        notion_ops_client._notion.blocks.delete.side_effect = Exception(
-            "object_not_found"
+        notion_ops_client._notion.blocks.delete.side_effect = make_api_error(
+            404, APIErrorCode.ObjectNotFound, "object_not_found"
         )
 
         with pytest.raises(NotFoundError) as exc_info:

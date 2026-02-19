@@ -1,6 +1,10 @@
 """Custom exceptions for Notion Operations library."""
 
+from __future__ import annotations
+
 from typing import Any
+
+from notion_client import APIResponseError
 
 
 class NotionOpsError(Exception):
@@ -59,3 +63,54 @@ class PermissionError(NotionOpsError):
 
     def __init__(self, message: str = "Insufficient permissions for this operation"):
         super().__init__(message, code="restricted_resource")
+
+
+def map_api_error(
+    error: APIResponseError,
+    resource_type: str = "resource",
+    resource_id: str = "",
+) -> NotionOpsError:
+    """Map a Notion API error to the appropriate custom exception.
+
+    Uses the HTTP status code and Notion error code from the
+    ``APIResponseError`` to select a specific ``NotionOpsError`` subclass.
+
+    Args:
+        error: The ``APIResponseError`` raised by the notion-client SDK.
+        resource_type: Human-readable resource type (e.g. "Page", "Block").
+        resource_id: The ID of the resource the operation targeted.
+
+    Returns:
+        An instance of the appropriate ``NotionOpsError`` subclass.
+    """
+    status = error.status
+    # error.code may be an APIErrorCode enum or a plain string; normalise.
+    code = str(error.code.value) if hasattr(error.code, "value") else str(error.code)
+
+    if status == 404 or code == "object_not_found":
+        return NotFoundError(resource_type, resource_id)
+
+    if status == 401 or code == "unauthorized":
+        return AuthenticationError()
+
+    if status == 403 or code == "restricted_resource":
+        return PermissionError()
+
+    if status == 429 or code == "rate_limited":
+        retry_after = 1.0
+        if hasattr(error, "headers") and error.headers is not None:
+            raw = error.headers.get("Retry-After")
+            if raw is not None:
+                try:
+                    retry_after = float(raw)
+                except (ValueError, TypeError):
+                    pass
+        return RateLimitError(retry_after=retry_after)
+
+    if status == 400 or code in ("validation_error", "invalid_json", "invalid_request"):
+        return ValidationError(str(error))
+
+    if status == 409 or code == "conflict_error":
+        return ConflictError(str(error))
+
+    return NotionOpsError(str(error), code=code)

@@ -2,7 +2,9 @@
 
 from typing import TYPE_CHECKING, Any, Iterator
 
-from notion_ops.exceptions import NotFoundError, NotionOpsError
+from notion_client import APIResponseError
+
+from notion_ops.exceptions import NotionOpsError, map_api_error
 from notion_ops.models.database import DataSource, DataSourceSchema, QueryResult
 from notion_ops.models.page import Page
 from notion_ops.models.properties import PropertyDefinition
@@ -37,9 +39,11 @@ class DataSourceOperations:
             # Use database retrieve endpoint (data source ID == database ID in most cases)
             response = self._client._notion.databases.retrieve(database_id=data_source_id)
             return DataSource.from_api_response(response)
+        except APIResponseError as e:
+            raise map_api_error(
+                e, resource_type="DataSource", resource_id=data_source_id
+            ) from e
         except Exception as e:
-            if "object_not_found" in str(e).lower():
-                raise NotFoundError("DataSource", data_source_id) from e
             raise NotionOpsError(f"Failed to retrieve data source: {e}") from e
 
     @retry_on_transient
@@ -103,9 +107,11 @@ class DataSourceOperations:
                 body=body,
             )
             return QueryResult.from_api_response(response, Page)
+        except APIResponseError as e:
+            raise map_api_error(
+                e, resource_type="DataSource", resource_id=data_source_id
+            ) from e
         except Exception as e:
-            if "object_not_found" in str(e).lower():
-                raise NotFoundError("DataSource", data_source_id) from e
             raise NotionOpsError(f"Failed to query data source: {e}") from e
 
     @retry_on_transient
@@ -194,9 +200,11 @@ class DataSourceOperations:
                 **update_data,
             )
             return DataSource.from_api_response(response)
+        except APIResponseError as e:
+            raise map_api_error(
+                e, resource_type="DataSource", resource_id=data_source_id
+            ) from e
         except Exception as e:
-            if "object_not_found" in str(e).lower():
-                raise NotFoundError("DataSource", data_source_id) from e
             raise NotionOpsError(f"Failed to update data source schema: {e}") from e
 
     @retry_on_transient
@@ -219,6 +227,10 @@ class DataSourceOperations:
                 properties={property_name: None},
             )
             return DataSource.from_api_response(response)
+        except APIResponseError as e:
+            raise map_api_error(
+                e, resource_type="DataSource", resource_id=data_source_id
+            ) from e
         except Exception as e:
             raise NotionOpsError(f"Failed to delete property: {e}") from e
 

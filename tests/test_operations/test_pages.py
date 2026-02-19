@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
+from notion_client.errors import APIErrorCode
 
 from notion_ops.exceptions import NotFoundError, NotionOpsError
 from notion_ops.models.page import Page
@@ -63,10 +64,10 @@ class TestPageGet:
             page_id="pageget001"
         )
 
-    def test_get_page_not_found(self, notion_ops_client):
+    def test_get_page_not_found(self, notion_ops_client, make_api_error):
         """Get page with invalid ID raises NotFoundError."""
-        notion_ops_client._notion.pages.retrieve.side_effect = Exception(
-            "Could not find page with ID: abc. object_not_found"
+        notion_ops_client._notion.pages.retrieve.side_effect = make_api_error(
+            404, APIErrorCode.ObjectNotFound, "Could not find page with ID: abc"
         )
 
         with pytest.raises(NotFoundError) as exc_info:

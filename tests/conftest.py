@@ -2,7 +2,10 @@
 
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
+from notion_client import APIResponseError
+from notion_client.errors import APIErrorCode
 
 from notion_ops.client import NotionOps
 
@@ -264,5 +267,41 @@ def mock_user_response():
             }
 
         return response
+
+    return _factory
+
+
+@pytest.fixture
+def make_api_error():
+    """Factory fixture that creates ``APIResponseError`` instances for testing.
+
+    Usage::
+
+        err = make_api_error(404, APIErrorCode.ObjectNotFound, "Not found")
+        mock.side_effect = err
+    """
+
+    def _factory(
+        status: int = 500,
+        code: str | APIErrorCode = "internal_server_error",
+        message: str = "An error occurred",
+        *,
+        headers: dict[str, str] | None = None,
+        body: str | None = None,
+    ) -> APIResponseError:
+        hdrs = httpx.Headers(headers or {"content-type": "application/json"})
+        if body is None:
+            code_str = code.value if isinstance(code, APIErrorCode) else code
+            body = (
+                f'{{"object":"error","code":"{code_str}",'
+                f'"message":"{message}"}}'
+            )
+        return APIResponseError(
+            code=code,
+            status=status,
+            message=message,
+            headers=hdrs,
+            raw_body_text=body,
+        )
 
     return _factory

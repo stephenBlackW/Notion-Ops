@@ -3,7 +3,9 @@
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from notion_ops.exceptions import NotFoundError, NotionOpsError
+from notion_client import APIResponseError
+
+from notion_ops.exceptions import NotionOpsError, map_api_error
 from notion_ops.models.block import Block, BlockType
 from notion_ops.utils.retry import retry_on_transient
 
@@ -45,9 +47,9 @@ class BlockOperations:
         try:
             response = self._client._notion.blocks.retrieve(block_id=block_id)
             return Block.from_api_response(response)
+        except APIResponseError as e:
+            raise map_api_error(e, resource_type="Block", resource_id=block_id) from e
         except Exception as e:
-            if "object_not_found" in str(e).lower():
-                raise NotFoundError("Block", block_id) from e
             raise NotionOpsError(f"Failed to retrieve block: {e}") from e
 
     @retry_on_transient
@@ -108,9 +110,11 @@ class BlockOperations:
 
                 start_cursor = response.get("next_cursor")
 
+            except APIResponseError as e:
+                raise map_api_error(
+                    e, resource_type="Block", resource_id=block_id
+                ) from e
             except Exception as e:
-                if "object_not_found" in str(e).lower():
-                    raise NotFoundError("Block", block_id) from e
                 raise NotionOpsError(f"Failed to get block children: {e}") from e
 
         return blocks
@@ -162,9 +166,11 @@ class BlockOperations:
 
             return [Block.from_api_response(b) for b in response.get("results", [])]
 
+        except APIResponseError as e:
+            raise map_api_error(
+                e, resource_type="Block", resource_id=parent_id
+            ) from e
         except Exception as e:
-            if "object_not_found" in str(e).lower():
-                raise NotFoundError("Block", parent_id) from e
             raise NotionOpsError(f"Failed to append blocks: {e}") from e
 
     @retry_on_transient
@@ -201,9 +207,9 @@ class BlockOperations:
                 **update_data,
             )
             return Block.from_api_response(response)
+        except APIResponseError as e:
+            raise map_api_error(e, resource_type="Block", resource_id=block_id) from e
         except Exception as e:
-            if "object_not_found" in str(e).lower():
-                raise NotFoundError("Block", block_id) from e
             raise NotionOpsError(f"Failed to update block: {e}") from e
 
     @retry_on_transient
@@ -218,9 +224,9 @@ class BlockOperations:
 
         try:
             self._client._notion.blocks.delete(block_id=block_id)
+        except APIResponseError as e:
+            raise map_api_error(e, resource_type="Block", resource_id=block_id) from e
         except Exception as e:
-            if "object_not_found" in str(e).lower():
-                raise NotFoundError("Block", block_id) from e
             raise NotionOpsError(f"Failed to delete block: {e}") from e
 
     @retry_on_transient
@@ -242,9 +248,9 @@ class BlockOperations:
                 archived=True,
             )
             return Block.from_api_response(response)
+        except APIResponseError as e:
+            raise map_api_error(e, resource_type="Block", resource_id=block_id) from e
         except Exception as e:
-            if "object_not_found" in str(e).lower():
-                raise NotFoundError("Block", block_id) from e
             raise NotionOpsError(f"Failed to archive block: {e}") from e
 
     @retry_on_transient
@@ -283,6 +289,10 @@ class BlockOperations:
 
             try:
                 response = self._client._notion.blocks.children.list(**params)
+            except APIResponseError as e:
+                raise map_api_error(
+                    e, resource_type="Block", resource_id=parent_id
+                ) from e
             except Exception as e:
                 raise NotionOpsError(f"Failed to list children: {e}") from e
 

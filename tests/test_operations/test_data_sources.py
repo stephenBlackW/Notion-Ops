@@ -1,6 +1,7 @@
 """Tests for DataSourceOperations."""
 
 import pytest
+from notion_client.errors import APIErrorCode
 
 from notion_ops.exceptions import NotFoundError, NotionOpsError
 from notion_ops.models.database import DataSource, QueryResult
@@ -26,10 +27,10 @@ class TestDataSourceGet:
             database_id="dsget001"
         )
 
-    def test_get_data_source_not_found(self, notion_ops_client):
+    def test_get_data_source_not_found(self, notion_ops_client, make_api_error):
         """Get data source with invalid ID raises NotFoundError."""
-        notion_ops_client._notion.databases.retrieve.side_effect = Exception(
-            "Could not find data source. object_not_found"
+        notion_ops_client._notion.databases.retrieve.side_effect = make_api_error(
+            404, APIErrorCode.ObjectNotFound, "Could not find data source."
         )
 
         with pytest.raises(NotFoundError) as exc_info:
@@ -73,10 +74,10 @@ class TestDataSourceQuery:
         assert call_kwargs["method"] == "POST"
         assert "filter" in call_kwargs["body"]
 
-    def test_query_data_source_not_found(self, notion_ops_client):
+    def test_query_data_source_not_found(self, notion_ops_client, make_api_error):
         """Query against missing data source raises NotFoundError."""
-        notion_ops_client._notion.request.side_effect = Exception(
-            "object_not_found"
+        notion_ops_client._notion.request.side_effect = make_api_error(
+            404, APIErrorCode.ObjectNotFound, "object_not_found"
         )
 
         with pytest.raises(NotFoundError) as exc_info:
@@ -167,12 +168,12 @@ class TestDataSourceUpdateSchema:
         call_kwargs = notion_ops_client._notion.databases.update.call_args.kwargs
         assert "Priority" in call_kwargs["properties"]
 
-    def test_update_schema_not_found(self, notion_ops_client):
+    def test_update_schema_not_found(self, notion_ops_client, make_api_error):
         """Update schema on missing data source raises NotFoundError."""
         from notion_ops.models.properties import PropertyDefinition, PropertyType
 
-        notion_ops_client._notion.databases.update.side_effect = Exception(
-            "object_not_found"
+        notion_ops_client._notion.databases.update.side_effect = make_api_error(
+            404, APIErrorCode.ObjectNotFound, "object_not_found"
         )
 
         prop_def = PropertyDefinition(name="X", type=PropertyType.CHECKBOX)
