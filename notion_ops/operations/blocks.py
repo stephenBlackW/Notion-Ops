@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 
 from notion_ops.exceptions import NotFoundError, NotionOpsError
 from notion_ops.models.block import Block, BlockType
+from notion_ops.utils.retry import retry_on_transient
 
 if TYPE_CHECKING:
     from notion_ops.client import NotionOps
@@ -28,6 +29,7 @@ class BlockOperations:
     def __init__(self, client: "NotionOps"):
         self._client = client
 
+    @retry_on_transient
     def get(self, block_id: str) -> Block:
         """
         Retrieve a block by ID.
@@ -48,6 +50,7 @@ class BlockOperations:
                 raise NotFoundError("Block", block_id) from e
             raise NotionOpsError(f"Failed to retrieve block: {e}") from e
 
+    @retry_on_transient
     def get_children(
         self,
         block_id: str,
@@ -112,6 +115,7 @@ class BlockOperations:
 
         return blocks
 
+    @retry_on_transient
     def append(
         self,
         parent_id: str,
@@ -163,6 +167,7 @@ class BlockOperations:
                 raise NotFoundError("Block", parent_id) from e
             raise NotionOpsError(f"Failed to append blocks: {e}") from e
 
+    @retry_on_transient
     def update(
         self,
         block_id: str,
@@ -201,6 +206,7 @@ class BlockOperations:
                 raise NotFoundError("Block", block_id) from e
             raise NotionOpsError(f"Failed to update block: {e}") from e
 
+    @retry_on_transient
     def delete(self, block_id: str) -> None:
         """
         Delete a block.
@@ -217,6 +223,7 @@ class BlockOperations:
                 raise NotFoundError("Block", block_id) from e
             raise NotionOpsError(f"Failed to delete block: {e}") from e
 
+    @retry_on_transient
     def archive(self, block_id: str) -> Block:
         """
         Archive a block (same as delete).
@@ -240,6 +247,7 @@ class BlockOperations:
                 raise NotFoundError("Block", block_id) from e
             raise NotionOpsError(f"Failed to archive block: {e}") from e
 
+    @retry_on_transient
     def get_child_pages(
         self,
         parent_id: str,

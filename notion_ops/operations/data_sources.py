@@ -6,6 +6,7 @@ from notion_ops.exceptions import NotFoundError, NotionOpsError
 from notion_ops.models.database import DataSource, DataSourceSchema, QueryResult
 from notion_ops.models.page import Page
 from notion_ops.models.properties import PropertyDefinition
+from notion_ops.utils.retry import retry_on_transient
 
 if TYPE_CHECKING:
     from notion_ops.client import NotionOps
@@ -17,6 +18,7 @@ class DataSourceOperations:
     def __init__(self, client: "NotionOps"):
         self._client = client
 
+    @retry_on_transient
     def get(self, data_source_id: str) -> DataSource:
         """
         Retrieve a data source by ID.
@@ -40,6 +42,7 @@ class DataSourceOperations:
                 raise NotFoundError("DataSource", data_source_id) from e
             raise NotionOpsError(f"Failed to retrieve data source: {e}") from e
 
+    @retry_on_transient
     def query(
         self,
         data_source_id: str,
@@ -105,6 +108,7 @@ class DataSourceOperations:
                 raise NotFoundError("DataSource", data_source_id) from e
             raise NotionOpsError(f"Failed to query data source: {e}") from e
 
+    @retry_on_transient
     def query_all(
         self,
         data_source_id: str,
@@ -146,6 +150,7 @@ class DataSourceOperations:
 
             start_cursor = result.next_cursor
 
+    @retry_on_transient
     def update_schema(
         self,
         data_source_id: str,
@@ -194,6 +199,7 @@ class DataSourceOperations:
                 raise NotFoundError("DataSource", data_source_id) from e
             raise NotionOpsError(f"Failed to update data source schema: {e}") from e
 
+    @retry_on_transient
     def delete_property(self, data_source_id: str, property_name: str) -> DataSource:
         """
         Delete a property from the data source schema.
@@ -216,6 +222,7 @@ class DataSourceOperations:
         except Exception as e:
             raise NotionOpsError(f"Failed to delete property: {e}") from e
 
+    @retry_on_transient
     def count(
         self,
         data_source_id: str,

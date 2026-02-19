@@ -6,6 +6,7 @@ from notion_ops.exceptions import NotFoundError, NotionOpsError
 from notion_ops.models.block import Block
 from notion_ops.models.page import Page, PageCreate, PageUpdate
 from notion_ops.models.properties import PropertyValue
+from notion_ops.utils.retry import retry_on_transient
 
 if TYPE_CHECKING:
     from notion_ops.client import NotionOps
@@ -17,6 +18,7 @@ class PageOperations:
     def __init__(self, client: "NotionOps"):
         self._client = client
 
+    @retry_on_transient
     def create(
         self,
         parent_id: str,
@@ -69,6 +71,7 @@ class PageOperations:
         except Exception as e:
             raise NotionOpsError(f"Failed to create page: {e}") from e
 
+    @retry_on_transient
     def get(self, page_id: str) -> Page:
         """
         Retrieve a page by ID.
@@ -94,6 +97,7 @@ class PageOperations:
                 raise NotFoundError("Page", page_id) from e
             raise NotionOpsError(f"Failed to retrieve page: {e}") from e
 
+    @retry_on_transient
     def update(
         self,
         page_id: str,
@@ -150,6 +154,7 @@ class PageOperations:
                 raise NotFoundError("Page", page_id) from e
             raise NotionOpsError(f"Failed to update page: {e}") from e
 
+    @retry_on_transient
     def archive(self, page_id: str) -> Page:
         """
         Archive (soft delete) a page.
@@ -162,6 +167,7 @@ class PageOperations:
         """
         return self.update(page_id, archived=True)
 
+    @retry_on_transient
     def restore(self, page_id: str) -> Page:
         """
         Restore an archived page.
@@ -174,6 +180,7 @@ class PageOperations:
         """
         return self.update(page_id, archived=False)
 
+    @retry_on_transient
     def delete(self, page_id: str) -> None:
         """
         Delete a page (move to trash).
@@ -186,6 +193,7 @@ class PageOperations:
         # In Notion API, archiving is the delete operation
         self.archive(page_id)
 
+    @retry_on_transient
     def move(
         self,
         page_id: str,
@@ -245,6 +253,7 @@ class PageOperations:
         except Exception as e:
             raise NotionOpsError(f"Failed to move page: {e}") from e
 
+    @retry_on_transient
     def get_property(self, page_id: str, property_id: str) -> Any:
         """
         Retrieve a specific property value from a page.

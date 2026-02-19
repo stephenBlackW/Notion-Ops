@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel
 
 from notion_ops.exceptions import NotFoundError, NotionOpsError
+from notion_ops.utils.retry import retry_on_transient
 
 if TYPE_CHECKING:
     from notion_ops.client import NotionOps
@@ -40,6 +41,7 @@ class UserOperations:
     def __init__(self, client: "NotionOps"):
         self._client = client
 
+    @retry_on_transient
     def get(self, user_id: str) -> User:
         """
         Retrieve a user by ID.
@@ -58,6 +60,7 @@ class UserOperations:
                 raise NotFoundError("User", user_id) from e
             raise NotionOpsError(f"Failed to retrieve user: {e}") from e
 
+    @retry_on_transient
     def list(self, page_size: int = 100) -> list[User]:
         """
         List all users in the workspace.
@@ -92,6 +95,7 @@ class UserOperations:
 
         return users
 
+    @retry_on_transient
     def me(self) -> User:
         """
         Get the bot user associated with the current integration.

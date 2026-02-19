@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from notion_ops.exceptions import NotFoundError, NotionOpsError
 from notion_ops.models.database import Database, DataSource
 from notion_ops.models.properties import PropertyDefinition
+from notion_ops.utils.retry import retry_on_transient
 
 if TYPE_CHECKING:
     from notion_ops.client import NotionOps
@@ -16,6 +17,7 @@ class DatabaseOperations:
     def __init__(self, client: "NotionOps"):
         self._client = client
 
+    @retry_on_transient
     def create(
         self,
         parent_id: str,
@@ -99,6 +101,7 @@ class DatabaseOperations:
         except Exception as e:
             raise NotionOpsError(f"Failed to create database: {e}") from e
 
+    @retry_on_transient
     def get(self, database_id: str) -> Database:
         """
         Retrieve a database by ID.
@@ -119,6 +122,7 @@ class DatabaseOperations:
                 raise NotFoundError("Database", database_id) from e
             raise NotionOpsError(f"Failed to retrieve database: {e}") from e
 
+    @retry_on_transient
     def update(
         self,
         database_id: str,
@@ -181,6 +185,7 @@ class DatabaseOperations:
                 raise NotFoundError("Database", database_id) from e
             raise NotionOpsError(f"Failed to update database: {e}") from e
 
+    @retry_on_transient
     def list_data_sources(self, database_id: str) -> list[DataSource]:
         """
         List all data sources in a database.
@@ -214,6 +219,7 @@ class DatabaseOperations:
             )
         ]
 
+    @retry_on_transient
     def archive(self, database_id: str) -> Database:
         """
         Archive a database.
