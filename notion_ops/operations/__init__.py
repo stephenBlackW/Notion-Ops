@@ -1,10 +1,10 @@
 """CRUD operations for Notion resources."""
 
-from notion_ops.operations.blocks import BlockOperations
-from notion_ops.operations.databases import DatabaseOperations
-from notion_ops.operations.data_sources import DataSourceOperations
-from notion_ops.operations.pages import PageOperations
-from notion_ops.operations.users import UserOperations
+from notion_ops.operations.blocks import AsyncBlockOperations, BlockOperations
+from notion_ops.operations.data_sources import AsyncDataSourceOperations, DataSourceOperations
+from notion_ops.operations.databases import AsyncDatabaseOperations, DatabaseOperations
+from notion_ops.operations.pages import AsyncPageOperations, PageOperations
+from notion_ops.operations.users import AsyncUserOperations, UserOperations
 
 __all__ = [
     "PageOperations",
@@ -12,4 +12,9 @@ __all__ = [
     "DataSourceOperations",
     "BlockOperations",
     "UserOperations",
+    "AsyncPageOperations",
+    "AsyncDatabaseOperations",
+    "AsyncDataSourceOperations",
+    "AsyncBlockOperations",
+    "AsyncUserOperations",
 ]

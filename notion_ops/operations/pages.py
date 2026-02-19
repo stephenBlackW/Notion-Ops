@@ -8,10 +8,10 @@ from notion_ops.exceptions import NotionOpsError, map_api_error
 from notion_ops.models.block import Block
 from notion_ops.models.page import Page, PageCreate, PageUpdate
 from notion_ops.models.properties import PropertyValue
-from notion_ops.utils.retry import retry_on_transient
+from notion_ops.utils.retry import retry_on_transient, retry_on_transient_async
 
 if TYPE_CHECKING:
-    from notion_ops.client import NotionOps
+    from notion_ops.client import AsyncNotionOps, NotionOps
 
 
 class PageOperations:
@@ -286,3 +286,237 @@ class PageOperations:
 
         # Remove dashes if present (normalize ID format)
         return id_or_url.replace("-", "")
+
+
+class AsyncPageOperations:
+    """Async CRUD operations for Notion pages."""
+
+    def __init__(self, client: "AsyncNotionOps") -> None:
+        self._client = client
+
+    def _extract_id(self, id_or_url: str) -> str:
+        """Extract page ID from URL or return as-is."""
+        if id_or_url.startswith("http"):
+            parts = id_or_url.rstrip("/").split("-")
+            if parts:
+                potential_id = parts[-1]
+                if len(potential_id) == 32:
+                    return potential_id
+            path = id_or_url.split("notion.so/")[-1].split("?")[0]
+            if "/" in path:
+                path = path.split("/")[-1]
+            if "-" in path:
+                path = path.split("-")[-1]
+            return path
+        return id_or_url.replace("-", "")
+
+    @retry_on_transient_async
+    async def create(
+        self,
+        parent_id: str,
+        properties: dict[str, PropertyValue],
+        *,
+        parent_type: Literal["database", "data_source", "page"] = "data_source",
+        children: list[Block] | None = None,
+        icon: str | dict[str, Any] | None = None,
+        cover: str | None = None,
+    ) -> Page:
+        """
+        Create a new page (async).
+
+        Args:
+            parent_id: ID of the parent database, data source, or page
+            properties: Dictionary of property names to values
+            parent_type: Type of parent ("database", "data_source", or "page")
+            children: Initial content blocks
+            icon: Emoji string or icon dict
+            cover: URL for cover image
+
+        Returns:
+            Created Page object
+        """
+        page_create = PageCreate(
+            parent_id=parent_id,
+            parent_type=parent_type,
+            properties=properties,
+            children=children,
+            icon=icon,
+            cover=cover,
+        )
+
+        try:
+            response = await self._client._notion.pages.create(**page_create.to_api_format())
+            return Page.from_api_response(response)
+        except APIResponseError as e:
+            raise map_api_error(e, resource_type="Page", resource_id=parent_id) from e
+        except Exception as e:
+            raise NotionOpsError(f"Failed to create page: {e}") from e
+
+    @retry_on_transient_async
+    async def get(self, page_id: str) -> Page:
+        """
+        Retrieve a page by ID (async).
+
+        Args:
+            page_id: The page ID or URL
+
+        Returns:
+            Page object
+        """
+        page_id = self._extract_id(page_id)
+
+        try:
+            response = await self._client._notion.pages.retrieve(page_id=page_id)
+            return Page.from_api_response(response)
+        except APIResponseError as e:
+            raise map_api_error(e, resource_type="Page", resource_id=page_id) from e
+        except Exception as e:
+            raise NotionOpsError(f"Failed to retrieve page: {e}") from e
+
+    @retry_on_transient_async
+    async def update(
+        self,
+        page_id: str,
+        properties: dict[str, PropertyValue] | None = None,
+        *,
+        archived: bool | None = None,
+        icon: str | dict[str, Any] | None = None,
+        cover: str | None = None,
+    ) -> Page:
+        """
+        Update page properties (async).
+
+        Args:
+            page_id: The page ID
+            properties: Properties to update
+            archived: Set archive status
+            icon: Update icon
+            cover: Update cover image
+
+        Returns:
+            Updated Page object
+        """
+        page_id = self._extract_id(page_id)
+
+        page_update = PageUpdate(
+            properties=properties,
+            archived=archived,
+            icon=icon,
+            cover=cover,
+        )
+
+        update_data = page_update.to_api_format()
+        if not update_data:
+            return await self.get(page_id)
+
+        try:
+            response = await self._client._notion.pages.update(
+                page_id=page_id,
+                **update_data,
+            )
+            return Page.from_api_response(response)
+        except APIResponseError as e:
+            raise map_api_error(e, resource_type="Page", resource_id=page_id) from e
+        except Exception as e:
+            raise NotionOpsError(f"Failed to update page: {e}") from e
+
+    @retry_on_transient_async
+    async def archive(self, page_id: str) -> Page:
+        """
+        Archive (soft delete) a page (async).
+
+        Args:
+            page_id: The page ID
+
+        Returns:
+            Updated Page object
+        """
+        return await self.update(page_id, archived=True)
+
+    @retry_on_transient_async
+    async def restore(self, page_id: str) -> Page:
+        """
+        Restore an archived page (async).
+
+        Args:
+            page_id: The page ID
+
+        Returns:
+            Updated Page object
+        """
+        return await self.update(page_id, archived=False)
+
+    @retry_on_transient_async
+    async def delete(self, page_id: str) -> None:
+        """
+        Delete a page (move to trash) (async).
+
+        Note: Pages in trash are permanently deleted after 30 days.
+
+        Args:
+            page_id: The page ID
+        """
+        await self.archive(page_id)
+
+    @retry_on_transient_async
+    async def move(
+        self,
+        page_id: str,
+        *,
+        parent_id: str,
+        parent_type: Literal["data_source", "page"] = "data_source",
+    ) -> Page:
+        """
+        Move a page to a new parent (page or data source) (async).
+
+        Args:
+            page_id: The page to move.
+            parent_id: The new parent ID.
+            parent_type: Either "data_source" (for databases) or "page".
+
+        Returns:
+            The moved Page object.
+        """
+        page_id = self._extract_id(page_id)
+        parent_id_clean = self._extract_id(parent_id)
+
+        parent_key = "data_source_id" if parent_type == "data_source" else "page_id"
+
+        try:
+            response = await self._client._notion.pages.move(
+                page_id=page_id,
+                parent={
+                    "type": parent_key,
+                    parent_key: parent_id_clean,
+                },
+            )
+            return Page.from_api_response(response)
+        except APIResponseError as e:
+            raise map_api_error(e, resource_type="Page", resource_id=page_id) from e
+        except Exception as e:
+            raise NotionOpsError(f"Failed to move page: {e}") from e
+
+    @retry_on_transient_async
+    async def get_property(self, page_id: str, property_id: str) -> Any:
+        """
+        Retrieve a specific property value from a page (async).
+
+        Args:
+            page_id: The page ID
+            property_id: The property ID or name
+
+        Returns:
+            Property value
+        """
+        page_id = self._extract_id(page_id)
+
+        try:
+            response = await self._client._notion.pages.properties.retrieve(
+                page_id=page_id,
+                property_id=property_id,
+            )
+            return response
+        except APIResponseError as e:
+            raise map_api_error(e, resource_type="Page", resource_id=page_id) from e
+        except Exception as e:
+            raise NotionOpsError(f"Failed to retrieve property: {e}") from e

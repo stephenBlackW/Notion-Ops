@@ -1,13 +1,13 @@
 """Shared pytest fixtures for Notion Operations tests."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 from notion_client import APIResponseError
 from notion_client.errors import APIErrorCode
 
-from notion_ops.client import NotionOps
+from notion_ops.client import AsyncNotionOps, NotionOps
 
 
 @pytest.fixture
@@ -305,3 +305,22 @@ def make_api_error():
         )
 
     return _factory
+
+
+@pytest.fixture
+def async_notion_ops_client():
+    """AsyncNotionOps with mocked async Notion client."""
+    with patch.dict("os.environ", {"NOTION_API_KEY": "test-key"}):
+        with patch("notion_ops.client.AsyncClient"):
+            client = AsyncNotionOps()
+            client._notion = AsyncMock()
+            # Set up sub-endpoint mocks
+            client._notion.pages = AsyncMock()
+            client._notion.pages.properties = AsyncMock()
+            client._notion.blocks = AsyncMock()
+            client._notion.blocks.children = AsyncMock()
+            client._notion.databases = AsyncMock()
+            client._notion.users = AsyncMock()
+            client._notion.search = AsyncMock()
+            client._notion.request = AsyncMock()
+            return client

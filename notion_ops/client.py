@@ -7,11 +7,11 @@ from notion_client import AsyncClient, Client
 
 from notion_ops.exceptions import AuthenticationError
 from notion_ops.models.page import Page
-from notion_ops.operations.blocks import BlockOperations
-from notion_ops.operations.data_sources import DataSourceOperations
-from notion_ops.operations.databases import DatabaseOperations
-from notion_ops.operations.pages import PageOperations
-from notion_ops.operations.users import UserOperations
+from notion_ops.operations.blocks import AsyncBlockOperations, BlockOperations
+from notion_ops.operations.data_sources import AsyncDataSourceOperations, DataSourceOperations
+from notion_ops.operations.databases import AsyncDatabaseOperations, DatabaseOperations
+from notion_ops.operations.pages import AsyncPageOperations, PageOperations
+from notion_ops.operations.users import AsyncUserOperations, UserOperations
 
 
 class NotionOps:
@@ -179,9 +179,12 @@ class AsyncNotionOps:
             notion_version=notion_version,
         )
 
-        # Note: Async operations would need async versions of the operation classes
-        # For now, expose the underlying async client
-        self._client = self._notion
+        # Initialize async operation handlers
+        self.pages = AsyncPageOperations(self)
+        self.databases = AsyncDatabaseOperations(self)
+        self.data_sources = AsyncDataSourceOperations(self)
+        self.blocks = AsyncBlockOperations(self)
+        self.users = AsyncUserOperations(self)
 
     async def __aenter__(self) -> "AsyncNotionOps":
         return self

@@ -1,6 +1,7 @@
 """DataSource CRUD operations for Notion Operations library."""
 
-from typing import TYPE_CHECKING, Any, Iterator
+from collections.abc import AsyncIterator, Iterator
+from typing import TYPE_CHECKING, Any
 
 from notion_client import APIResponseError
 
@@ -8,10 +9,10 @@ from notion_ops.exceptions import NotionOpsError, map_api_error
 from notion_ops.models.database import DataSource, DataSourceSchema, QueryResult
 from notion_ops.models.page import Page
 from notion_ops.models.properties import PropertyDefinition
-from notion_ops.utils.retry import retry_on_transient
+from notion_ops.utils.retry import retry_on_transient, retry_on_transient_async
 
 if TYPE_CHECKING:
-    from notion_ops.client import NotionOps
+    from notion_ops.client import AsyncNotionOps, NotionOps
 
 
 class DataSourceOperations:
@@ -268,3 +269,224 @@ class DataSourceOperations:
                 path = path.split("-")[-1]
             return path
         return id_or_url.replace("-", "")
+
+
+class AsyncDataSourceOperations:
+    """Async CRUD operations for Notion data sources (collections of pages)."""
+
+    def __init__(self, client: "AsyncNotionOps") -> None:
+        self._client = client
+
+    def _extract_id(self, id_or_url: str) -> str:
+        """Extract data source ID from URL or return as-is."""
+        if id_or_url.startswith("http"):
+            path = id_or_url.split("notion.so/")[-1].split("?")[0]
+            if "/" in path:
+                path = path.split("/")[-1]
+            if "-" in path:
+                path = path.split("-")[-1]
+            return path
+        return id_or_url.replace("-", "")
+
+    @retry_on_transient_async
+    async def get(self, data_source_id: str) -> DataSource:
+        """
+        Retrieve a data source by ID (async).
+
+        Note: In the current API, data sources and databases share the same ID.
+
+        Args:
+            data_source_id: The data source ID
+
+        Returns:
+            DataSource object
+        """
+        data_source_id = self._extract_id(data_source_id)
+
+        try:
+            response = await self._client._notion.databases.retrieve(
+                database_id=data_source_id
+            )
+            return DataSource.from_api_response(response)
+        except APIResponseError as e:
+            raise map_api_error(
+                e, resource_type="DataSource", resource_id=data_source_id
+            ) from e
+        except Exception as e:
+            raise NotionOpsError(f"Failed to retrieve data source: {e}") from e
+
+    @retry_on_transient_async
+    async def query(
+        self,
+        data_source_id: str,
+        *,
+        filter: dict[str, Any] | None = None,
+        sorts: list[dict[str, str]] | None = None,
+        page_size: int = 100,
+        start_cursor: str | None = None,
+    ) -> QueryResult:
+        """
+        Query pages in a data source (async).
+
+        Args:
+            data_source_id: The data source ID
+            filter: Filter conditions
+            sorts: Sort specifications
+            page_size: Results per page (max 100)
+            start_cursor: Pagination cursor
+
+        Returns:
+            QueryResult with pages and pagination info
+        """
+        data_source_id = self._extract_id(data_source_id)
+
+        body: dict[str, Any] = {
+            "page_size": min(page_size, 100),
+        }
+
+        if filter:
+            body["filter"] = filter
+
+        if sorts:
+            body["sorts"] = sorts
+
+        if start_cursor:
+            body["start_cursor"] = start_cursor
+
+        try:
+            response = await self._client._notion.request(
+                path=f"databases/{data_source_id}/query",
+                method="POST",
+                body=body,
+            )
+            return QueryResult.from_api_response(response, Page)
+        except APIResponseError as e:
+            raise map_api_error(
+                e, resource_type="DataSource", resource_id=data_source_id
+            ) from e
+        except Exception as e:
+            raise NotionOpsError(f"Failed to query data source: {e}") from e
+
+    async def query_all(
+        self,
+        data_source_id: str,
+        *,
+        filter: dict[str, Any] | None = None,
+        sorts: list[dict[str, str]] | None = None,
+    ) -> AsyncIterator[Page]:
+        """
+        Query all pages in a data source (async, handles pagination automatically).
+
+        Args:
+            data_source_id: The data source ID
+            filter: Filter conditions
+            sorts: Sort specifications
+
+        Yields:
+            Page objects
+        """
+        start_cursor: str | None = None
+
+        while True:
+            result = await self.query(
+                data_source_id,
+                filter=filter,
+                sorts=sorts,
+                page_size=100,
+                start_cursor=start_cursor,
+            )
+
+            for page in result.pages:
+                yield page
+
+            if not result.has_more or not result.next_cursor:
+                break
+
+            start_cursor = result.next_cursor
+
+    @retry_on_transient_async
+    async def update_schema(
+        self,
+        data_source_id: str,
+        properties: dict[str, PropertyDefinition],
+    ) -> DataSource:
+        """
+        Update data source schema (add/modify properties) (async).
+
+        Args:
+            data_source_id: The data source ID
+            properties: Property definitions to add or update
+
+        Returns:
+            Updated DataSource object
+        """
+        data_source_id = self._extract_id(data_source_id)
+
+        update_data = {
+            "properties": {
+                name: prop_def.to_api_format() for name, prop_def in properties.items()
+            }
+        }
+
+        try:
+            response = await self._client._notion.databases.update(
+                database_id=data_source_id,
+                **update_data,
+            )
+            return DataSource.from_api_response(response)
+        except APIResponseError as e:
+            raise map_api_error(
+                e, resource_type="DataSource", resource_id=data_source_id
+            ) from e
+        except Exception as e:
+            raise NotionOpsError(f"Failed to update data source schema: {e}") from e
+
+    @retry_on_transient_async
+    async def delete_property(self, data_source_id: str, property_name: str) -> DataSource:
+        """
+        Delete a property from the data source schema (async).
+
+        Args:
+            data_source_id: The data source ID
+            property_name: Name of the property to delete
+
+        Returns:
+            Updated DataSource object
+        """
+        data_source_id = self._extract_id(data_source_id)
+
+        try:
+            response = await self._client._notion.databases.update(
+                database_id=data_source_id,
+                properties={property_name: None},
+            )
+            return DataSource.from_api_response(response)
+        except APIResponseError as e:
+            raise map_api_error(
+                e, resource_type="DataSource", resource_id=data_source_id
+            ) from e
+        except Exception as e:
+            raise NotionOpsError(f"Failed to delete property: {e}") from e
+
+    async def count(
+        self,
+        data_source_id: str,
+        *,
+        filter: dict[str, Any] | None = None,
+    ) -> int:
+        """
+        Count pages in a data source matching a filter (async).
+
+        Note: This iterates through all pages, which may be slow for large data sources.
+
+        Args:
+            data_source_id: The data source ID
+            filter: Optional filter conditions
+
+        Returns:
+            Number of matching pages
+        """
+        count = 0
+        async for _ in self.query_all(data_source_id, filter=filter):
+            count += 1
+        return count
