@@ -98,12 +98,11 @@ class DataSourceOperations:
             body["start_cursor"] = start_cursor
 
         try:
-            # Use raw request — the SDK's databases.query() doesn't exist and
-            # data_sources.query() has signature mismatches. The REST API at
-            # /databases/{id}/query works reliably for both database and
-            # data source IDs.
+            # Use raw request — the SDK's databases.query() doesn't exist.
+            # As of Notion API v2025-09-03, the query endpoint moved from
+            # /databases/{id}/query to /data_sources/{id}/query.
             response = self._client._notion.request(
-                path=f"databases/{data_source_id}/query",
+                path=f"data_sources/{data_source_id}/query",
                 method="POST",
                 body=body,
             )
@@ -355,7 +354,7 @@ class AsyncDataSourceOperations:
 
         try:
             response = await self._client._notion.request(
-                path=f"databases/{data_source_id}/query",
+                path=f"data_sources/{data_source_id}/query",
                 method="POST",
                 body=body,
             )
