@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from typing import Any
@@ -9,6 +10,49 @@ from typing import Any
 from notion_ops.models.block import Blocks, Block, BlockType
 
 logger = logging.getLogger(__name__)
+
+# Notion API limits
+_RICH_TEXT_CHAR_LIMIT = 2000
+_SAFE_CHAR_LIMIT = 1900  # Leave room for formatting overhead
+_MAX_BLOCKS_PER_REQUEST = 100
+_MAX_PAYLOAD_BYTES = 300_000  # Conservative payload size limit
+
+
+def _find_split_point(text: str, max_len: int) -> int:
+    """Find a natural split point in text at or before *max_len*.
+
+    Looks for (in order of preference):
+    1. Last newline before *max_len*
+    2. Last space before *max_len*
+    3. Exactly at *max_len* (hard fallback)
+
+    Will not split before ``max_len // 2`` to avoid producing tiny chunks.
+    """
+    if len(text) <= max_len:
+        return len(text)
+
+    min_pos = max_len // 2
+
+    # Prefer splitting at a line boundary
+    nl = text.rfind('\n', min_pos, max_len)
+    if nl > 0:
+        return nl + 1  # include the newline in the first chunk
+
+    # Next best: split at a word boundary
+    sp = text.rfind(' ', min_pos, max_len)
+    if sp > 0:
+        return sp + 1  # include the space in the first chunk
+
+    # Hard fallback – split at the exact limit
+    return max_len
+
+
+def _estimate_block_size(block: dict[str, Any]) -> int:
+    """Estimate the serialised JSON size of a Notion block dict (bytes)."""
+    try:
+        return len(json.dumps(block))
+    except (TypeError, ValueError):
+        return 1000  # conservative default
 
 
 def _parse_inline_formatting(text: str) -> list[dict[str, Any]]:
@@ -247,14 +291,16 @@ def markdown_to_blocks(markdown: str) -> list[dict[str, Any]]:
             text = '\n'.join(current_text).strip()
             if text:
                 # Handle text length limits (Notion max ~2000 chars per block)
-                while len(text) > 1900:
-                    # Create paragraph with inline formatting
-                    rich_text = _parse_inline_formatting(text[:1900])
-                    blocks.append(Block(
-                        type=BlockType.PARAGRAPH,
-                        content={"rich_text": rich_text}
-                    ))
-                    text = text[1900:]
+                while len(text) > _SAFE_CHAR_LIMIT:
+                    split_at = _find_split_point(text, _SAFE_CHAR_LIMIT)
+                    chunk = text[:split_at].rstrip()
+                    if chunk:
+                        rich_text = _parse_inline_formatting(chunk)
+                        blocks.append(Block(
+                            type=BlockType.PARAGRAPH,
+                            content={"rich_text": rich_text}
+                        ))
+                    text = text[split_at:].lstrip()
                 if text:
                     rich_text = _parse_inline_formatting(text)
                     blocks.append(Block(
@@ -267,7 +313,19 @@ def markdown_to_blocks(markdown: str) -> list[dict[str, Any]]:
         nonlocal code_content, code_lang
         code_text = '\n'.join(code_content)
         if code_text.strip():
-            blocks.append(Blocks.code(code_text, language=code_lang))
+            # Split long code blocks at line boundaries
+            if len(code_text) > _SAFE_CHAR_LIMIT:
+                remaining = code_text
+                while len(remaining) > _SAFE_CHAR_LIMIT:
+                    split_at = _find_split_point(remaining, _SAFE_CHAR_LIMIT)
+                    chunk = remaining[:split_at].rstrip('\n')
+                    if chunk:
+                        blocks.append(Blocks.code(chunk, language=code_lang))
+                    remaining = remaining[split_at:]
+                if remaining.strip():
+                    blocks.append(Blocks.code(remaining, language=code_lang))
+            else:
+                blocks.append(Blocks.code(code_text, language=code_lang))
         code_content = []
         code_lang = "plain text"
 
@@ -564,14 +622,32 @@ def create_atom_page(
             # Convert markdown to blocks (returns dicts in API format)
             blocks = markdown_to_blocks(content_markdown)
 
-            # Append in batches (Notion limit ~100 blocks per request)
-            # Use raw API since markdown_to_blocks returns dicts, not Block objects
-            batch_size = 100
-            for i in range(0, len(blocks), batch_size):
-                batch = blocks[i:i + batch_size]
+            # Size-aware batching: respect both the block-count limit and
+            # a conservative payload-size limit to avoid API rejections.
+            current_batch: list[dict[str, Any]] = []
+            current_size = 0
+
+            for block in blocks:
+                block_size = _estimate_block_size(block)
+
+                if current_batch and (
+                    len(current_batch) >= _MAX_BLOCKS_PER_REQUEST
+                    or current_size + block_size > _MAX_PAYLOAD_BYTES
+                ):
+                    notion_client._notion.blocks.children.append(
+                        block_id=page.id,
+                        children=current_batch,
+                    )
+                    current_batch = []
+                    current_size = 0
+
+                current_batch.append(block)
+                current_size += block_size
+
+            if current_batch:
                 notion_client._notion.blocks.children.append(
                     block_id=page.id,
-                    children=batch
+                    children=current_batch,
                 )
         except Exception as e:
             result['content_error'] = str(e)
