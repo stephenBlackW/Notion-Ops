@@ -3,7 +3,8 @@
 import functools
 import logging
 import time
-from typing import Any, Callable, TypeVar, cast
+from collections.abc import Callable
+from typing import Any, TypeVar, cast
 
 from httpx import HTTPStatusError
 

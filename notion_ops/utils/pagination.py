@@ -1,6 +1,7 @@
 """Pagination utilities for Notion Operations library."""
 
-from typing import Any, Callable, Iterator, TypeVar
+from collections.abc import Callable, Iterator
+from typing import Any, TypeVar
 
 T = TypeVar("T")
 
@@ -39,8 +40,7 @@ def iterate_paginated(
 
         response = fetch_func(**params)
 
-        for item in response.get("results", []):
-            yield item
+        yield from response.get("results", [])
 
         if not response.get("has_more"):
             break

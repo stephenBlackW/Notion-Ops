@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 from notion_client import APIResponseError
 
 from notion_ops.exceptions import NotionOpsError, map_api_error
-from notion_ops.models.block import Block, BlockType
+from notion_ops.models.block import Block
 from notion_ops.utils.retry import retry_on_transient, retry_on_transient_async
 
 if TYPE_CHECKING:
@@ -98,7 +98,7 @@ class BlockOperations:
                     # Recursively fetch children if requested
                     if recursive and block.has_children:
                         block.children = self.get_children(
-                            block.id,  # type: ignore
+                            block.id,
                             page_size=page_size,
                             recursive=True,
                         )
@@ -466,7 +466,7 @@ class AsyncBlockOperations:
 
                     if recursive and block.has_children:
                         block.children = await self.get_children(
-                            block.id,  # type: ignore
+                            block.id,
                             page_size=page_size,
                             recursive=True,
                         )
