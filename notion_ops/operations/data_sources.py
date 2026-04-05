@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 from notion_client import APIResponseError
 
 from notion_ops.exceptions import NotionOpsError, map_api_error
-from notion_ops.models.database import DataSource, DataSourceSchema, QueryResult
+from notion_ops.models.database import DataSource, QueryResult
 from notion_ops.models.page import Page
 from notion_ops.models.properties import PropertyDefinition
 from notion_ops.utils.retry import retry_on_transient, retry_on_transient_async
@@ -148,8 +148,7 @@ class DataSourceOperations:
                 start_cursor=start_cursor,
             )
 
-            for page in result.pages:
-                yield page
+            yield from result.pages
 
             if not result.has_more or not result.next_cursor:
                 break

@@ -3,12 +3,12 @@
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from notion_ops.models.properties import PropertyValue, parse_property_value
 
 if TYPE_CHECKING:
-    from notion_ops.models.block import Block
+    pass
 
 
 class Page(BaseModel):

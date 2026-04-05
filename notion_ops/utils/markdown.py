@@ -7,7 +7,7 @@ import logging
 import re
 from typing import Any
 
-from notion_ops.models.block import Blocks, Block, BlockType
+from notion_ops.models.block import Block, Blocks, BlockType
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +73,11 @@ def _parse_inline_formatting(text: str) -> list[dict[str, Any]]:
 
     # Pattern to match markdown inline formatting
     # Order matters: bold before italic (** before *)
-    pattern = r'(\*\*(.+?)\*\*|__(.+?)__|~~(.+?)~~|\*(.+?)\*|_(.+?)_|`(.+?)`|\[([^\]]+)\]\(([^)]+)\))'
+    pattern = (
+        r'(\*\*(.+?)\*\*|__(.+?)__|~~(.+?)~~'
+        r'|\*(.+?)\*|_(.+?)_|`(.+?)`'
+        r'|\[([^\]]+)\]\(([^)]+)\))'
+    )
 
     last_end = 0
     for match in re.finditer(pattern, text):
@@ -563,10 +567,10 @@ def create_atom_page(
         print(result['url'])
     """
     from notion_ops.models.properties import (
-        TitleProperty,
-        SelectProperty,
-        RichTextProperty,
         RelationProperty,
+        RichTextProperty,
+        SelectProperty,
+        TitleProperty,
     )
 
     # Build properties
