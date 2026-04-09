@@ -101,7 +101,7 @@ class TestAsyncDataSourceQuery:
         # Verify it uses _notion.request, NOT _notion.databases.query
         client._notion.request.assert_called_once()
         call_kwargs = client._notion.request.call_args.kwargs
-        assert call_kwargs["path"] == "databases/dsquery001/query"
+        assert call_kwargs["path"] == "data_sources/dsquery001/query"
         assert call_kwargs["method"] == "POST"
         assert "filter" in call_kwargs["body"]
 

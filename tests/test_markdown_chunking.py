@@ -9,15 +9,13 @@ import pytest
 
 from notion_ops.models.page import Page
 from notion_ops.utils.markdown import (
-    _find_split_point,
-    _estimate_block_size,
-    _SAFE_CHAR_LIMIT,
     _MAX_BLOCKS_PER_REQUEST,
-    _MAX_PAYLOAD_BYTES,
-    markdown_to_blocks,
+    _SAFE_CHAR_LIMIT,
+    _estimate_block_size,
+    _find_split_point,
     create_atom_page,
+    markdown_to_blocks,
 )
-
 
 # ---------------------------------------------------------------------------
 # _find_split_point
@@ -87,7 +85,14 @@ class TestEstimateBlockSize:
     """Tests for _estimate_block_size helper."""
 
     def test_simple_block(self):
-        block = {"type": "paragraph", "paragraph": {"rich_text": [{"type": "text", "text": {"content": "hello"}}]}}
+        block = {
+            "type": "paragraph",
+            "paragraph": {
+                "rich_text": [
+                    {"type": "text", "text": {"content": "hello"}}
+                ]
+            },
+        }
         size = _estimate_block_size(block)
         assert size == len(json.dumps(block))
 

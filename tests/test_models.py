@@ -2,9 +2,7 @@
 
 from datetime import datetime
 
-import pytest
-
-from notion_ops.models.block import Block, Blocks, BlockType
+from notion_ops.models.block import Blocks, BlockType
 from notion_ops.models.filters import Filter, Sort
 from notion_ops.models.page import Page, PageCreate
 from notion_ops.models.properties import (
@@ -12,7 +10,6 @@ from notion_ops.models.properties import (
     DateProperty,
     MultiSelectProperty,
     NumberProperty,
-    PropertyType,
     SelectProperty,
     TitleProperty,
     parse_property_value,
