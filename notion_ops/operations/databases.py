@@ -7,6 +7,7 @@ from notion_client import APIResponseError
 from notion_ops.exceptions import NotionOpsError, map_api_error
 from notion_ops.models.database import Database, DataSource
 from notion_ops.models.properties import PropertyDefinition
+from notion_ops.utils.ids import extract_notion_id
 from notion_ops.utils.retry import retry_on_transient, retry_on_transient_async
 
 if TYPE_CHECKING:
@@ -118,7 +119,7 @@ class DatabaseOperations:
         Returns:
             Database object
         """
-        database_id = self._extract_id(database_id)
+        database_id = extract_notion_id(database_id)
 
         try:
             response = self._client._notion.databases.retrieve(database_id=database_id)
@@ -155,7 +156,7 @@ class DatabaseOperations:
         Returns:
             Updated Database object
         """
-        database_id = self._extract_id(database_id)
+        database_id = extract_notion_id(database_id)
 
         update_data: dict[str, Any] = {}
 
@@ -240,7 +241,7 @@ class DatabaseOperations:
         Returns:
             Updated Database object
         """
-        database_id = self._extract_id(database_id)
+        database_id = extract_notion_id(database_id)
 
         try:
             response = self._client._notion.databases.update(
@@ -255,17 +256,6 @@ class DatabaseOperations:
         except Exception as e:
             raise NotionOpsError(f"Failed to archive database: {e}") from e
 
-    def _extract_id(self, id_or_url: str) -> str:
-        """Extract database ID from URL or return as-is."""
-        if id_or_url.startswith("http"):
-            # Extract from Notion URL
-            path = id_or_url.split("notion.so/")[-1].split("?")[0]
-            if "/" in path:
-                path = path.split("/")[-1]
-            if "-" in path:
-                path = path.split("-")[-1]
-            return path
-        return id_or_url.replace("-", "")
 
 
 class AsyncDatabaseOperations:
@@ -273,17 +263,6 @@ class AsyncDatabaseOperations:
 
     def __init__(self, client: "AsyncNotionOps") -> None:
         self._client = client
-
-    def _extract_id(self, id_or_url: str) -> str:
-        """Extract database ID from URL or return as-is."""
-        if id_or_url.startswith("http"):
-            path = id_or_url.split("notion.so/")[-1].split("?")[0]
-            if "/" in path:
-                path = path.split("/")[-1]
-            if "-" in path:
-                path = path.split("-")[-1]
-            return path
-        return id_or_url.replace("-", "")
 
     @retry_on_transient_async
     async def create(
@@ -366,7 +345,7 @@ class AsyncDatabaseOperations:
         Returns:
             Database object
         """
-        database_id = self._extract_id(database_id)
+        database_id = extract_notion_id(database_id)
 
         try:
             response = await self._client._notion.databases.retrieve(database_id=database_id)
@@ -403,7 +382,7 @@ class AsyncDatabaseOperations:
         Returns:
             Updated Database object
         """
-        database_id = self._extract_id(database_id)
+        database_id = extract_notion_id(database_id)
 
         update_data: dict[str, Any] = {}
 
@@ -486,7 +465,7 @@ class AsyncDatabaseOperations:
         Returns:
             Updated Database object
         """
-        database_id = self._extract_id(database_id)
+        database_id = extract_notion_id(database_id)
 
         try:
             response = await self._client._notion.databases.update(

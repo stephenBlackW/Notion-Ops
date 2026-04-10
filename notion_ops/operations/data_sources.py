@@ -9,6 +9,7 @@ from notion_ops.exceptions import NotionOpsError, map_api_error
 from notion_ops.models.database import DataSource, QueryResult
 from notion_ops.models.page import Page
 from notion_ops.models.properties import PropertyDefinition
+from notion_ops.utils.ids import extract_notion_id
 from notion_ops.utils.retry import retry_on_transient, retry_on_transient_async
 
 if TYPE_CHECKING:
@@ -34,7 +35,7 @@ class DataSourceOperations:
         Returns:
             DataSource object
         """
-        data_source_id = self._extract_id(data_source_id)
+        data_source_id = extract_notion_id(data_source_id)
 
         try:
             # Use database retrieve endpoint (data source ID == database ID in most cases)
@@ -82,7 +83,7 @@ class DataSourceOperations:
             for page in results.pages:
                 print(page.get_title())
         """
-        data_source_id = self._extract_id(data_source_id)
+        data_source_id = extract_notion_id(data_source_id)
 
         body: dict[str, Any] = {
             "page_size": min(page_size, 100),
@@ -187,7 +188,7 @@ class DataSourceOperations:
                 }
             )
         """
-        data_source_id = self._extract_id(data_source_id)
+        data_source_id = extract_notion_id(data_source_id)
 
         update_data = {
             "properties": {name: prop_def.to_api_format() for name, prop_def in properties.items()}
@@ -218,7 +219,7 @@ class DataSourceOperations:
         Returns:
             Updated DataSource object
         """
-        data_source_id = self._extract_id(data_source_id)
+        data_source_id = extract_notion_id(data_source_id)
 
         try:
             response = self._client._notion.databases.update(
@@ -257,34 +258,12 @@ class DataSourceOperations:
             count += 1
         return count
 
-    def _extract_id(self, id_or_url: str) -> str:
-        """Extract data source ID from URL or return as-is."""
-        if id_or_url.startswith("http"):
-            path = id_or_url.split("notion.so/")[-1].split("?")[0]
-            if "/" in path:
-                path = path.split("/")[-1]
-            if "-" in path:
-                path = path.split("-")[-1]
-            return path
-        return id_or_url.replace("-", "")
-
 
 class AsyncDataSourceOperations:
     """Async CRUD operations for Notion data sources (collections of pages)."""
 
     def __init__(self, client: "AsyncNotionOps") -> None:
         self._client = client
-
-    def _extract_id(self, id_or_url: str) -> str:
-        """Extract data source ID from URL or return as-is."""
-        if id_or_url.startswith("http"):
-            path = id_or_url.split("notion.so/")[-1].split("?")[0]
-            if "/" in path:
-                path = path.split("/")[-1]
-            if "-" in path:
-                path = path.split("-")[-1]
-            return path
-        return id_or_url.replace("-", "")
 
     @retry_on_transient_async
     async def get(self, data_source_id: str) -> DataSource:
@@ -299,7 +278,7 @@ class AsyncDataSourceOperations:
         Returns:
             DataSource object
         """
-        data_source_id = self._extract_id(data_source_id)
+        data_source_id = extract_notion_id(data_source_id)
 
         try:
             response = await self._client._notion.databases.retrieve(
@@ -336,7 +315,7 @@ class AsyncDataSourceOperations:
         Returns:
             QueryResult with pages and pagination info
         """
-        data_source_id = self._extract_id(data_source_id)
+        data_source_id = extract_notion_id(data_source_id)
 
         body: dict[str, Any] = {
             "page_size": min(page_size, 100),
@@ -418,7 +397,7 @@ class AsyncDataSourceOperations:
         Returns:
             Updated DataSource object
         """
-        data_source_id = self._extract_id(data_source_id)
+        data_source_id = extract_notion_id(data_source_id)
 
         update_data = {
             "properties": {
@@ -451,7 +430,7 @@ class AsyncDataSourceOperations:
         Returns:
             Updated DataSource object
         """
-        data_source_id = self._extract_id(data_source_id)
+        data_source_id = extract_notion_id(data_source_id)
 
         try:
             response = await self._client._notion.databases.update(

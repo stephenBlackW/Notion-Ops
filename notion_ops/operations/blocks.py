@@ -7,6 +7,7 @@ from notion_client import APIResponseError
 
 from notion_ops.exceptions import NotionOpsError, map_api_error
 from notion_ops.models.block import Block
+from notion_ops.utils.ids import extract_notion_id
 from notion_ops.utils.retry import retry_on_transient, retry_on_transient_async
 
 if TYPE_CHECKING:
@@ -42,7 +43,7 @@ class BlockOperations:
         Returns:
             Block object
         """
-        block_id = self._extract_id(block_id)
+        block_id = extract_notion_id(block_id)
 
         try:
             response = self._client._notion.blocks.retrieve(block_id=block_id)
@@ -76,7 +77,7 @@ class BlockOperations:
             for block in blocks:
                 print(f"{block.type}: {block.get_plain_text()}")
         """
-        block_id = self._extract_id(block_id)
+        block_id = extract_notion_id(block_id)
 
         blocks: list[Block] = []
         start_cursor: str | None = None
@@ -149,7 +150,7 @@ class BlockOperations:
                 ]
             )
         """
-        parent_id = self._extract_id(parent_id)
+        parent_id = extract_notion_id(parent_id)
 
         # Convert blocks to API format
         children_data = [block.to_api_format() for block in children]
@@ -160,7 +161,7 @@ class BlockOperations:
                 "children": children_data,
             }
             if after:
-                params["after"] = self._extract_id(after)
+                params["after"] = extract_notion_id(after)
 
             response = self._client._notion.blocks.children.append(**params)
 
@@ -195,7 +196,7 @@ class BlockOperations:
                 content={"rich_text": [{"type": "text", "text": {"content": "Updated text"}}]}
             )
         """
-        block_id = self._extract_id(block_id)
+        block_id = extract_notion_id(block_id)
 
         # First get the block to know its type
         existing_block = self.get(block_id)
@@ -220,7 +221,7 @@ class BlockOperations:
         Args:
             block_id: The block ID
         """
-        block_id = self._extract_id(block_id)
+        block_id = extract_notion_id(block_id)
 
         try:
             self._client._notion.blocks.delete(block_id=block_id)
@@ -240,7 +241,7 @@ class BlockOperations:
         Returns:
             Archived Block object
         """
-        block_id = self._extract_id(block_id)
+        block_id = extract_notion_id(block_id)
 
         try:
             response = self._client._notion.blocks.update(
@@ -277,7 +278,7 @@ class BlockOperations:
         Returns:
             List of ChildPageInfo objects.
         """
-        parent_id = self._extract_id(parent_id)
+        parent_id = extract_notion_id(parent_id)
         child_pages: list[ChildPageInfo] = []
 
         # Paginate through all children to find child_page blocks
@@ -370,20 +371,6 @@ class BlockOperations:
         info.block_types = block_types
         return info
 
-    def _extract_id(self, id_or_url: str) -> str:
-        """Extract block ID from URL or return as-is."""
-        if id_or_url.startswith("http"):
-            # Extract from Notion URL
-            path = id_or_url.split("notion.so/")[-1].split("?")[0]
-            if "#" in path:
-                # Block ID might be after #
-                path = path.split("#")[-1]
-            if "/" in path:
-                path = path.split("/")[-1]
-            if "-" in path:
-                path = path.split("-")[-1]
-            return path
-        return id_or_url.replace("-", "")
 
 
 class AsyncBlockOperations:
@@ -391,19 +378,6 @@ class AsyncBlockOperations:
 
     def __init__(self, client: "AsyncNotionOps") -> None:
         self._client = client
-
-    def _extract_id(self, id_or_url: str) -> str:
-        """Extract block ID from URL or return as-is."""
-        if id_or_url.startswith("http"):
-            path = id_or_url.split("notion.so/")[-1].split("?")[0]
-            if "#" in path:
-                path = path.split("#")[-1]
-            if "/" in path:
-                path = path.split("/")[-1]
-            if "-" in path:
-                path = path.split("-")[-1]
-            return path
-        return id_or_url.replace("-", "")
 
     @retry_on_transient_async
     async def get(self, block_id: str) -> Block:
@@ -416,7 +390,7 @@ class AsyncBlockOperations:
         Returns:
             Block object
         """
-        block_id = self._extract_id(block_id)
+        block_id = extract_notion_id(block_id)
 
         try:
             response = await self._client._notion.blocks.retrieve(block_id=block_id)
@@ -445,7 +419,7 @@ class AsyncBlockOperations:
         Returns:
             List of Block objects
         """
-        block_id = self._extract_id(block_id)
+        block_id = extract_notion_id(block_id)
 
         blocks: list[Block] = []
         start_cursor: str | None = None
@@ -506,7 +480,7 @@ class AsyncBlockOperations:
         Returns:
             Created Block objects
         """
-        parent_id = self._extract_id(parent_id)
+        parent_id = extract_notion_id(parent_id)
 
         children_data = [block.to_api_format() for block in children]
 
@@ -516,7 +490,7 @@ class AsyncBlockOperations:
                 "children": children_data,
             }
             if after:
-                params["after"] = self._extract_id(after)
+                params["after"] = extract_notion_id(after)
 
             response = await self._client._notion.blocks.children.append(**params)
 
@@ -545,7 +519,7 @@ class AsyncBlockOperations:
         Returns:
             Updated Block object
         """
-        block_id = self._extract_id(block_id)
+        block_id = extract_notion_id(block_id)
 
         existing_block = await self.get(block_id)
 
@@ -569,7 +543,7 @@ class AsyncBlockOperations:
         Args:
             block_id: The block ID
         """
-        block_id = self._extract_id(block_id)
+        block_id = extract_notion_id(block_id)
 
         try:
             await self._client._notion.blocks.delete(block_id=block_id)
@@ -589,7 +563,7 @@ class AsyncBlockOperations:
         Returns:
             Archived Block object
         """
-        block_id = self._extract_id(block_id)
+        block_id = extract_notion_id(block_id)
 
         try:
             response = await self._client._notion.blocks.update(
@@ -626,7 +600,7 @@ class AsyncBlockOperations:
         Returns:
             List of ChildPageInfo objects.
         """
-        parent_id = self._extract_id(parent_id)
+        parent_id = extract_notion_id(parent_id)
         child_pages: list[ChildPageInfo] = []
 
         start_cursor: str | None = None

@@ -8,6 +8,7 @@ from notion_ops.exceptions import NotionOpsError, map_api_error
 from notion_ops.models.block import Block
 from notion_ops.models.page import Page, PageCreate, PageUpdate
 from notion_ops.models.properties import PropertyValue
+from notion_ops.utils.ids import extract_notion_id
 from notion_ops.utils.retry import retry_on_transient, retry_on_transient_async
 
 if TYPE_CHECKING:
@@ -91,7 +92,7 @@ class PageOperations:
             print(page.get_title())
         """
         # Extract ID from URL if needed
-        page_id = self._extract_id(page_id)
+        page_id = extract_notion_id(page_id)
 
         try:
             response = self._client._notion.pages.retrieve(page_id=page_id)
@@ -133,7 +134,7 @@ class PageOperations:
                 }
             )
         """
-        page_id = self._extract_id(page_id)
+        page_id = extract_notion_id(page_id)
 
         page_update = PageUpdate(
             properties=properties,
@@ -219,8 +220,8 @@ class PageOperations:
         Returns:
             The moved Page object.
         """
-        page_id = self._extract_id(page_id)
-        parent_id_clean = self._extract_id(parent_id)
+        page_id = extract_notion_id(page_id)
+        parent_id_clean = extract_notion_id(parent_id)
 
         parent_key = "data_source_id" if parent_type == "data_source" else "page_id"
 
@@ -250,7 +251,7 @@ class PageOperations:
         Returns:
             Property value
         """
-        page_id = self._extract_id(page_id)
+        page_id = extract_notion_id(page_id)
 
         try:
             response = self._client._notion.pages.properties.retrieve(
@@ -263,29 +264,6 @@ class PageOperations:
         except Exception as e:
             raise NotionOpsError(f"Failed to retrieve property: {e}") from e
 
-    def _extract_id(self, id_or_url: str) -> str:
-        """Extract page ID from URL or return as-is."""
-        if id_or_url.startswith("http"):
-            # Extract ID from Notion URL
-            # URL format: https://www.notion.so/workspace/Page-Title-<id>
-            # or https://www.notion.so/<id>
-            parts = id_or_url.rstrip("/").split("-")
-            if parts:
-                potential_id = parts[-1]
-                # Notion IDs are 32 hex characters (without dashes)
-                if len(potential_id) == 32:
-                    return potential_id
-            # Try extracting from path
-            path = id_or_url.split("notion.so/")[-1].split("?")[0]
-            if "/" in path:
-                path = path.split("/")[-1]
-            # Remove any title prefix
-            if "-" in path:
-                path = path.split("-")[-1]
-            return path
-
-        # Remove dashes if present (normalize ID format)
-        return id_or_url.replace("-", "")
 
 
 class AsyncPageOperations:
@@ -293,22 +271,6 @@ class AsyncPageOperations:
 
     def __init__(self, client: "AsyncNotionOps") -> None:
         self._client = client
-
-    def _extract_id(self, id_or_url: str) -> str:
-        """Extract page ID from URL or return as-is."""
-        if id_or_url.startswith("http"):
-            parts = id_or_url.rstrip("/").split("-")
-            if parts:
-                potential_id = parts[-1]
-                if len(potential_id) == 32:
-                    return potential_id
-            path = id_or_url.split("notion.so/")[-1].split("?")[0]
-            if "/" in path:
-                path = path.split("/")[-1]
-            if "-" in path:
-                path = path.split("-")[-1]
-            return path
-        return id_or_url.replace("-", "")
 
     @retry_on_transient_async
     async def create(
@@ -363,7 +325,7 @@ class AsyncPageOperations:
         Returns:
             Page object
         """
-        page_id = self._extract_id(page_id)
+        page_id = extract_notion_id(page_id)
 
         try:
             response = await self._client._notion.pages.retrieve(page_id=page_id)
@@ -396,7 +358,7 @@ class AsyncPageOperations:
         Returns:
             Updated Page object
         """
-        page_id = self._extract_id(page_id)
+        page_id = extract_notion_id(page_id)
 
         page_update = PageUpdate(
             properties=properties,
@@ -477,8 +439,8 @@ class AsyncPageOperations:
         Returns:
             The moved Page object.
         """
-        page_id = self._extract_id(page_id)
-        parent_id_clean = self._extract_id(parent_id)
+        page_id = extract_notion_id(page_id)
+        parent_id_clean = extract_notion_id(parent_id)
 
         parent_key = "data_source_id" if parent_type == "data_source" else "page_id"
 
@@ -508,7 +470,7 @@ class AsyncPageOperations:
         Returns:
             Property value
         """
-        page_id = self._extract_id(page_id)
+        page_id = extract_notion_id(page_id)
 
         try:
             response = await self._client._notion.pages.properties.retrieve(
