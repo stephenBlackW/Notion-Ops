@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any
 from notion_client import APIResponseError
 from pydantic import BaseModel
 
-from notion_ops.exceptions import NotionOpsError, map_api_error
+from notion_ops.exceptions import map_api_error
 from notion_ops.utils.retry import retry_on_transient, retry_on_transient_async
 
 if TYPE_CHECKING:
@@ -58,8 +58,6 @@ class UserOperations:
             return User.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="User", resource_id=user_id) from e
-        except Exception as e:
-            raise NotionOpsError(f"Failed to retrieve user: {e}") from e
 
     @retry_on_transient
     def list(self, page_size: int = 100) -> list[User]:
@@ -93,8 +91,6 @@ class UserOperations:
 
             except APIResponseError as e:
                 raise map_api_error(e, resource_type="User") from e
-            except Exception as e:
-                raise NotionOpsError(f"Failed to list users: {e}") from e
 
         return users
 
@@ -111,8 +107,6 @@ class UserOperations:
             return User.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="User") from e
-        except Exception as e:
-            raise NotionOpsError(f"Failed to get current user: {e}") from e
 
 
 class AsyncUserOperations:
@@ -137,8 +131,6 @@ class AsyncUserOperations:
             return User.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="User", resource_id=user_id) from e
-        except Exception as e:
-            raise NotionOpsError(f"Failed to retrieve user: {e}") from e
 
     @retry_on_transient_async
     async def list(self, page_size: int = 100) -> list[User]:
@@ -172,8 +164,6 @@ class AsyncUserOperations:
 
             except APIResponseError as e:
                 raise map_api_error(e, resource_type="User") from e
-            except Exception as e:
-                raise NotionOpsError(f"Failed to list users: {e}") from e
 
         return users
 
@@ -190,5 +180,3 @@ class AsyncUserOperations:
             return User.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="User") from e
-        except Exception as e:
-            raise NotionOpsError(f"Failed to get current user: {e}") from e

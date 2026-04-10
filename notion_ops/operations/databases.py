@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from notion_client import APIResponseError
 
-from notion_ops.exceptions import NotionOpsError, map_api_error
+from notion_ops.exceptions import map_api_error
 from notion_ops.models.database import Database, DataSource
 from notion_ops.models.properties import PropertyDefinition
 from notion_ops.utils.ids import extract_notion_id
@@ -105,8 +105,6 @@ class DatabaseOperations:
             raise map_api_error(
                 e, resource_type="Database", resource_id=parent_id
             ) from e
-        except Exception as e:
-            raise NotionOpsError(f"Failed to create database: {e}") from e
 
     @retry_on_transient
     def get(self, database_id: str) -> Database:
@@ -128,8 +126,6 @@ class DatabaseOperations:
             raise map_api_error(
                 e, resource_type="Database", resource_id=database_id
             ) from e
-        except Exception as e:
-            raise NotionOpsError(f"Failed to retrieve database: {e}") from e
 
     @retry_on_transient
     def update(
@@ -193,8 +189,6 @@ class DatabaseOperations:
             raise map_api_error(
                 e, resource_type="Database", resource_id=database_id
             ) from e
-        except Exception as e:
-            raise NotionOpsError(f"Failed to update database: {e}") from e
 
     @retry_on_transient
     def list_data_sources(self, database_id: str) -> list[DataSource]:
@@ -253,8 +247,6 @@ class DatabaseOperations:
             raise map_api_error(
                 e, resource_type="Database", resource_id=database_id
             ) from e
-        except Exception as e:
-            raise NotionOpsError(f"Failed to archive database: {e}") from e
 
 
 
@@ -331,8 +323,6 @@ class AsyncDatabaseOperations:
             raise map_api_error(
                 e, resource_type="Database", resource_id=parent_id
             ) from e
-        except Exception as e:
-            raise NotionOpsError(f"Failed to create database: {e}") from e
 
     @retry_on_transient_async
     async def get(self, database_id: str) -> Database:
@@ -354,8 +344,6 @@ class AsyncDatabaseOperations:
             raise map_api_error(
                 e, resource_type="Database", resource_id=database_id
             ) from e
-        except Exception as e:
-            raise NotionOpsError(f"Failed to retrieve database: {e}") from e
 
     @retry_on_transient_async
     async def update(
@@ -419,8 +407,6 @@ class AsyncDatabaseOperations:
             raise map_api_error(
                 e, resource_type="Database", resource_id=database_id
             ) from e
-        except Exception as e:
-            raise NotionOpsError(f"Failed to update database: {e}") from e
 
     @retry_on_transient_async
     async def list_data_sources(self, database_id: str) -> list[DataSource]:
@@ -477,5 +463,3 @@ class AsyncDatabaseOperations:
             raise map_api_error(
                 e, resource_type="Database", resource_id=database_id
             ) from e
-        except Exception as e:
-            raise NotionOpsError(f"Failed to archive database: {e}") from e

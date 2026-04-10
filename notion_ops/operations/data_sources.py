@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any
 
 from notion_client import APIResponseError
 
-from notion_ops.exceptions import NotionOpsError, map_api_error
+from notion_ops.exceptions import map_api_error
 from notion_ops.models.database import DataSource, QueryResult
 from notion_ops.models.page import Page
 from notion_ops.models.properties import PropertyDefinition
@@ -45,8 +45,6 @@ class DataSourceOperations:
             raise map_api_error(
                 e, resource_type="DataSource", resource_id=data_source_id
             ) from e
-        except Exception as e:
-            raise NotionOpsError(f"Failed to retrieve data source: {e}") from e
 
     @retry_on_transient
     def query(
@@ -112,8 +110,6 @@ class DataSourceOperations:
             raise map_api_error(
                 e, resource_type="DataSource", resource_id=data_source_id
             ) from e
-        except Exception as e:
-            raise NotionOpsError(f"Failed to query data source: {e}") from e
 
     @retry_on_transient
     def query_all(
@@ -204,8 +200,6 @@ class DataSourceOperations:
             raise map_api_error(
                 e, resource_type="DataSource", resource_id=data_source_id
             ) from e
-        except Exception as e:
-            raise NotionOpsError(f"Failed to update data source schema: {e}") from e
 
     @retry_on_transient
     def delete_property(self, data_source_id: str, property_name: str) -> DataSource:
@@ -231,8 +225,6 @@ class DataSourceOperations:
             raise map_api_error(
                 e, resource_type="DataSource", resource_id=data_source_id
             ) from e
-        except Exception as e:
-            raise NotionOpsError(f"Failed to delete property: {e}") from e
 
     @retry_on_transient
     def count(
@@ -289,8 +281,6 @@ class AsyncDataSourceOperations:
             raise map_api_error(
                 e, resource_type="DataSource", resource_id=data_source_id
             ) from e
-        except Exception as e:
-            raise NotionOpsError(f"Failed to retrieve data source: {e}") from e
 
     @retry_on_transient_async
     async def query(
@@ -341,8 +331,6 @@ class AsyncDataSourceOperations:
             raise map_api_error(
                 e, resource_type="DataSource", resource_id=data_source_id
             ) from e
-        except Exception as e:
-            raise NotionOpsError(f"Failed to query data source: {e}") from e
 
     async def query_all(
         self,
@@ -415,8 +403,6 @@ class AsyncDataSourceOperations:
             raise map_api_error(
                 e, resource_type="DataSource", resource_id=data_source_id
             ) from e
-        except Exception as e:
-            raise NotionOpsError(f"Failed to update data source schema: {e}") from e
 
     @retry_on_transient_async
     async def delete_property(self, data_source_id: str, property_name: str) -> DataSource:
@@ -442,8 +428,6 @@ class AsyncDataSourceOperations:
             raise map_api_error(
                 e, resource_type="DataSource", resource_id=data_source_id
             ) from e
-        except Exception as e:
-            raise NotionOpsError(f"Failed to delete property: {e}") from e
 
     async def count(
         self,

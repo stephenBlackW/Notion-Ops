@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any
 
 from notion_client import APIResponseError
 
-from notion_ops.exceptions import NotionOpsError, map_api_error
+from notion_ops.exceptions import map_api_error
 from notion_ops.models.block import Block
 from notion_ops.utils.ids import extract_notion_id
 from notion_ops.utils.retry import retry_on_transient, retry_on_transient_async
@@ -50,8 +50,6 @@ class BlockOperations:
             return Block.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="Block", resource_id=block_id) from e
-        except Exception as e:
-            raise NotionOpsError(f"Failed to retrieve block: {e}") from e
 
     @retry_on_transient
     def get_children(
@@ -115,8 +113,6 @@ class BlockOperations:
                 raise map_api_error(
                     e, resource_type="Block", resource_id=block_id
                 ) from e
-            except Exception as e:
-                raise NotionOpsError(f"Failed to get block children: {e}") from e
 
         return blocks
 
@@ -171,8 +167,6 @@ class BlockOperations:
             raise map_api_error(
                 e, resource_type="Block", resource_id=parent_id
             ) from e
-        except Exception as e:
-            raise NotionOpsError(f"Failed to append blocks: {e}") from e
 
     @retry_on_transient
     def update(
@@ -210,8 +204,6 @@ class BlockOperations:
             return Block.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="Block", resource_id=block_id) from e
-        except Exception as e:
-            raise NotionOpsError(f"Failed to update block: {e}") from e
 
     @retry_on_transient
     def delete(self, block_id: str) -> None:
@@ -227,8 +219,6 @@ class BlockOperations:
             self._client._notion.blocks.delete(block_id=block_id)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="Block", resource_id=block_id) from e
-        except Exception as e:
-            raise NotionOpsError(f"Failed to delete block: {e}") from e
 
     @retry_on_transient
     def archive(self, block_id: str) -> Block:
@@ -251,8 +241,6 @@ class BlockOperations:
             return Block.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="Block", resource_id=block_id) from e
-        except Exception as e:
-            raise NotionOpsError(f"Failed to archive block: {e}") from e
 
     @retry_on_transient
     def get_child_pages(
@@ -294,8 +282,6 @@ class BlockOperations:
                 raise map_api_error(
                     e, resource_type="Block", resource_id=parent_id
                 ) from e
-            except Exception as e:
-                raise NotionOpsError(f"Failed to list children: {e}") from e
 
             for block_data in response.get("results", []):
                 if block_data.get("type") != "child_page":
@@ -397,8 +383,6 @@ class AsyncBlockOperations:
             return Block.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="Block", resource_id=block_id) from e
-        except Exception as e:
-            raise NotionOpsError(f"Failed to retrieve block: {e}") from e
 
     @retry_on_transient_async
     async def get_children(
@@ -456,8 +440,6 @@ class AsyncBlockOperations:
                 raise map_api_error(
                     e, resource_type="Block", resource_id=block_id
                 ) from e
-            except Exception as e:
-                raise NotionOpsError(f"Failed to get block children: {e}") from e
 
         return blocks
 
@@ -500,8 +482,6 @@ class AsyncBlockOperations:
             raise map_api_error(
                 e, resource_type="Block", resource_id=parent_id
             ) from e
-        except Exception as e:
-            raise NotionOpsError(f"Failed to append blocks: {e}") from e
 
     @retry_on_transient_async
     async def update(
@@ -532,8 +512,6 @@ class AsyncBlockOperations:
             return Block.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="Block", resource_id=block_id) from e
-        except Exception as e:
-            raise NotionOpsError(f"Failed to update block: {e}") from e
 
     @retry_on_transient_async
     async def delete(self, block_id: str) -> None:
@@ -549,8 +527,6 @@ class AsyncBlockOperations:
             await self._client._notion.blocks.delete(block_id=block_id)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="Block", resource_id=block_id) from e
-        except Exception as e:
-            raise NotionOpsError(f"Failed to delete block: {e}") from e
 
     @retry_on_transient_async
     async def archive(self, block_id: str) -> Block:
@@ -573,8 +549,6 @@ class AsyncBlockOperations:
             return Block.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="Block", resource_id=block_id) from e
-        except Exception as e:
-            raise NotionOpsError(f"Failed to archive block: {e}") from e
 
     @retry_on_transient_async
     async def get_child_pages(
@@ -615,8 +589,6 @@ class AsyncBlockOperations:
                 raise map_api_error(
                     e, resource_type="Block", resource_id=parent_id
                 ) from e
-            except Exception as e:
-                raise NotionOpsError(f"Failed to list children: {e}") from e
 
             for block_data in response.get("results", []):
                 if block_data.get("type") != "child_page":

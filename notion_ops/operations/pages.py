@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from notion_client import APIResponseError
 
-from notion_ops.exceptions import NotionOpsError, map_api_error
+from notion_ops.exceptions import map_api_error
 from notion_ops.models.block import Block
 from notion_ops.models.page import Page, PageCreate, PageUpdate
 from notion_ops.models.properties import PropertyValue
@@ -73,8 +73,6 @@ class PageOperations:
             return Page.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="Page", resource_id=parent_id) from e
-        except Exception as e:
-            raise NotionOpsError(f"Failed to create page: {e}") from e
 
     @retry_on_transient
     def get(self, page_id: str) -> Page:
@@ -99,8 +97,6 @@ class PageOperations:
             return Page.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="Page", resource_id=page_id) from e
-        except Exception as e:
-            raise NotionOpsError(f"Failed to retrieve page: {e}") from e
 
     @retry_on_transient
     def update(
@@ -156,8 +152,6 @@ class PageOperations:
             return Page.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="Page", resource_id=page_id) from e
-        except Exception as e:
-            raise NotionOpsError(f"Failed to update page: {e}") from e
 
     @retry_on_transient
     def archive(self, page_id: str) -> Page:
@@ -236,8 +230,6 @@ class PageOperations:
             return Page.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="Page", resource_id=page_id) from e
-        except Exception as e:
-            raise NotionOpsError(f"Failed to move page: {e}") from e
 
     @retry_on_transient
     def get_property(self, page_id: str, property_id: str) -> Any:
@@ -261,8 +253,6 @@ class PageOperations:
             return response
         except APIResponseError as e:
             raise map_api_error(e, resource_type="Page", resource_id=page_id) from e
-        except Exception as e:
-            raise NotionOpsError(f"Failed to retrieve property: {e}") from e
 
 
 
@@ -311,8 +301,6 @@ class AsyncPageOperations:
             return Page.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="Page", resource_id=parent_id) from e
-        except Exception as e:
-            raise NotionOpsError(f"Failed to create page: {e}") from e
 
     @retry_on_transient_async
     async def get(self, page_id: str) -> Page:
@@ -332,8 +320,6 @@ class AsyncPageOperations:
             return Page.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="Page", resource_id=page_id) from e
-        except Exception as e:
-            raise NotionOpsError(f"Failed to retrieve page: {e}") from e
 
     @retry_on_transient_async
     async def update(
@@ -379,8 +365,6 @@ class AsyncPageOperations:
             return Page.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="Page", resource_id=page_id) from e
-        except Exception as e:
-            raise NotionOpsError(f"Failed to update page: {e}") from e
 
     @retry_on_transient_async
     async def archive(self, page_id: str) -> Page:
@@ -455,8 +439,6 @@ class AsyncPageOperations:
             return Page.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="Page", resource_id=page_id) from e
-        except Exception as e:
-            raise NotionOpsError(f"Failed to move page: {e}") from e
 
     @retry_on_transient_async
     async def get_property(self, page_id: str, property_id: str) -> Any:
@@ -480,5 +462,3 @@ class AsyncPageOperations:
             return response
         except APIResponseError as e:
             raise map_api_error(e, resource_type="Page", resource_id=page_id) from e
-        except Exception as e:
-            raise NotionOpsError(f"Failed to retrieve property: {e}") from e
