@@ -44,9 +44,10 @@ class TestPageCreate:
 
     @pytest.mark.asyncio
     async def test_create_page_error(self, ops):
+        """Generic exceptions propagate directly (not wrapped in NotionOpsError)."""
         ops.setup_mock("pages.create", side_effect=Exception("API connection failed"))
 
-        with pytest.raises(NotionOpsError, match="Failed to create page"):
+        with pytest.raises(Exception, match="API connection failed"):
             await maybe_await(
                 ops.pages.create(
                     parent_id="db-xyz789",
@@ -111,11 +112,12 @@ class TestPageGet:
 
     @pytest.mark.asyncio
     async def test_get_page_generic_error(self, ops):
+        """Generic exceptions propagate directly (not wrapped in NotionOpsError)."""
         ops.setup_mock(
             "pages.retrieve", side_effect=Exception("Internal server error")
         )
 
-        with pytest.raises(NotionOpsError, match="Failed to retrieve page"):
+        with pytest.raises(Exception, match="Internal server error"):
             await maybe_await(ops.pages.get("page-fail-001"))
 
 
@@ -301,9 +303,10 @@ class TestPageMove:
 
     @pytest.mark.asyncio
     async def test_move_page_generic_error(self, ops):
+        """Generic exceptions propagate directly (not wrapped in NotionOpsError)."""
         ops.setup_mock("pages.move", side_effect=Exception("Move failed"))
 
-        with pytest.raises(NotionOpsError, match="Failed to move page"):
+        with pytest.raises(Exception, match="Move failed"):
             await maybe_await(
                 ops.pages.move("page-err-001", parent_id="db-parent")
             )
@@ -340,12 +343,13 @@ class TestPageGetProperty:
 
     @pytest.mark.asyncio
     async def test_get_property_error(self, ops):
+        """Generic exceptions propagate directly (not wrapped in NotionOpsError)."""
         ops.setup_mock(
             "pages.properties.retrieve",
             side_effect=Exception("Property not found"),
         )
 
-        with pytest.raises(NotionOpsError, match="Failed to retrieve property"):
+        with pytest.raises(Exception, match="Property not found"):
             await maybe_await(
                 ops.pages.get_property("page-prop-001", "bad_prop")
             )
@@ -357,14 +361,17 @@ class TestPageGetProperty:
 
 
 class TestPageExtractId:
-    """Tests for _extract_id (sync & async)."""
+    """Tests for the shared extract_notion_id utility."""
 
     def test_extract_id_plain(self, ops):
-        assert ops.pages._extract_id("abc-def-123") == "abcdef123"
+        from notion_ops.utils.ids import extract_notion_id
+        assert extract_notion_id("abc-def-123") == "abcdef123"
 
     def test_extract_id_no_dashes(self, ops):
-        assert ops.pages._extract_id("abcdef123") == "abcdef123"
+        from notion_ops.utils.ids import extract_notion_id
+        assert extract_notion_id("abcdef123") == "abcdef123"
 
     def test_extract_id_from_url(self, ops):
+        from notion_ops.utils.ids import extract_notion_id
         url = "https://www.notion.so/workspace/Page-Title-abcdef12345678901234567890abcdef"
-        assert ops.pages._extract_id(url) == "abcdef12345678901234567890abcdef"
+        assert extract_notion_id(url) == "abcdef12345678901234567890abcdef"

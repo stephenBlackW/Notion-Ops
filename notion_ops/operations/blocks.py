@@ -46,7 +46,7 @@ class BlockOperations:
         block_id = extract_notion_id(block_id)
 
         try:
-            response = self._client._notion.blocks.retrieve(block_id=block_id)
+            response = self._client.api.blocks.retrieve(block_id=block_id)
             return Block.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="Block", resource_id=block_id) from e
@@ -89,7 +89,7 @@ class BlockOperations:
                 if start_cursor:
                     params["start_cursor"] = start_cursor
 
-                response = self._client._notion.blocks.children.list(**params)
+                response = self._client.api.blocks.children.list(**params)
 
                 for block_data in response.get("results", []):
                     block = Block.from_api_response(block_data)
@@ -159,7 +159,7 @@ class BlockOperations:
             if after:
                 params["after"] = extract_notion_id(after)
 
-            response = self._client._notion.blocks.children.append(**params)
+            response = self._client.api.blocks.children.append(**params)
 
             return [Block.from_api_response(b) for b in response.get("results", [])]
 
@@ -197,7 +197,7 @@ class BlockOperations:
 
         try:
             update_data = {existing_block.type.value: content}
-            response = self._client._notion.blocks.update(
+            response = self._client.api.blocks.update(
                 block_id=block_id,
                 **update_data,
             )
@@ -216,7 +216,7 @@ class BlockOperations:
         block_id = extract_notion_id(block_id)
 
         try:
-            self._client._notion.blocks.delete(block_id=block_id)
+            self._client.api.blocks.delete(block_id=block_id)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="Block", resource_id=block_id) from e
 
@@ -234,7 +234,7 @@ class BlockOperations:
         block_id = extract_notion_id(block_id)
 
         try:
-            response = self._client._notion.blocks.update(
+            response = self._client.api.blocks.update(
                 block_id=block_id,
                 archived=True,
             )
@@ -277,7 +277,7 @@ class BlockOperations:
                 params["start_cursor"] = start_cursor
 
             try:
-                response = self._client._notion.blocks.children.list(**params)
+                response = self._client.api.blocks.children.list(**params)
             except APIResponseError as e:
                 raise map_api_error(
                     e, resource_type="Block", resource_id=parent_id
@@ -315,7 +315,7 @@ class BlockOperations:
     ) -> ChildPageInfo:
         """Read a child page's blocks and populate plain_text summary."""
         try:
-            response = self._client._notion.blocks.children.list(
+            response = self._client.api.blocks.children.list(
                 block_id=info.id, page_size=min(max_blocks, 100)
             )
         except Exception as e:
@@ -379,7 +379,7 @@ class AsyncBlockOperations:
         block_id = extract_notion_id(block_id)
 
         try:
-            response = await self._client._notion.blocks.retrieve(block_id=block_id)
+            response = await self._client.api.blocks.retrieve(block_id=block_id)
             return Block.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="Block", resource_id=block_id) from e
@@ -417,7 +417,7 @@ class AsyncBlockOperations:
                 if start_cursor:
                     params["start_cursor"] = start_cursor
 
-                response = await self._client._notion.blocks.children.list(**params)
+                response = await self._client.api.blocks.children.list(**params)
 
                 for block_data in response.get("results", []):
                     block = Block.from_api_response(block_data)
@@ -474,7 +474,7 @@ class AsyncBlockOperations:
             if after:
                 params["after"] = extract_notion_id(after)
 
-            response = await self._client._notion.blocks.children.append(**params)
+            response = await self._client.api.blocks.children.append(**params)
 
             return [Block.from_api_response(b) for b in response.get("results", [])]
 
@@ -505,7 +505,7 @@ class AsyncBlockOperations:
 
         try:
             update_data = {existing_block.type.value: content}
-            response = await self._client._notion.blocks.update(
+            response = await self._client.api.blocks.update(
                 block_id=block_id,
                 **update_data,
             )
@@ -524,7 +524,7 @@ class AsyncBlockOperations:
         block_id = extract_notion_id(block_id)
 
         try:
-            await self._client._notion.blocks.delete(block_id=block_id)
+            await self._client.api.blocks.delete(block_id=block_id)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="Block", resource_id=block_id) from e
 
@@ -542,7 +542,7 @@ class AsyncBlockOperations:
         block_id = extract_notion_id(block_id)
 
         try:
-            response = await self._client._notion.blocks.update(
+            response = await self._client.api.blocks.update(
                 block_id=block_id,
                 archived=True,
             )
@@ -584,7 +584,7 @@ class AsyncBlockOperations:
                 params["start_cursor"] = start_cursor
 
             try:
-                response = await self._client._notion.blocks.children.list(**params)
+                response = await self._client.api.blocks.children.list(**params)
             except APIResponseError as e:
                 raise map_api_error(
                     e, resource_type="Block", resource_id=parent_id
@@ -622,7 +622,7 @@ class AsyncBlockOperations:
     ) -> ChildPageInfo:
         """Read a child page's blocks and populate plain_text summary (async)."""
         try:
-            response = await self._client._notion.blocks.children.list(
+            response = await self._client.api.blocks.children.list(
                 block_id=info.id, page_size=min(max_blocks, 100)
             )
         except Exception as e:

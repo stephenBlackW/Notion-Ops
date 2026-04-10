@@ -54,11 +54,12 @@ class TestBlockGet:
 
     @pytest.mark.asyncio
     async def test_get_block_generic_error(self, ops):
+        """Generic exceptions propagate directly (not wrapped in NotionOpsError)."""
         ops.setup_mock(
             "blocks.retrieve", side_effect=Exception("Unexpected error")
         )
 
-        with pytest.raises(NotionOpsError, match="Failed to retrieve block"):
+        with pytest.raises(Exception, match="Unexpected error"):
             await maybe_await(ops.blocks.get("block-err-001"))
 
 
@@ -250,12 +251,13 @@ class TestBlockAppend:
 
     @pytest.mark.asyncio
     async def test_append_blocks_generic_error(self, ops):
+        """Generic exceptions propagate directly (not wrapped in NotionOpsError)."""
         ops.setup_mock(
             "blocks.children.append",
             side_effect=Exception("Server error"),
         )
 
-        with pytest.raises(NotionOpsError, match="Failed to append blocks"):
+        with pytest.raises(Exception, match="Server error"):
             await maybe_await(
                 ops.blocks.append("page-err-001", [Blocks.paragraph("text")])
             )
@@ -351,11 +353,12 @@ class TestBlockDelete:
 
     @pytest.mark.asyncio
     async def test_delete_block_generic_error(self, ops):
+        """Generic exceptions propagate directly (not wrapped in NotionOpsError)."""
         ops.setup_mock(
             "blocks.delete", side_effect=Exception("Unexpected server error")
         )
 
-        with pytest.raises(NotionOpsError, match="Failed to delete block"):
+        with pytest.raises(Exception, match="Unexpected server error"):
             await maybe_await(ops.blocks.delete("block-err-001"))
 
 
@@ -441,16 +444,18 @@ class TestBlockGetChildPages:
 
 
 # ---------------------------------------------------------------------------
-# _extract_id
+# extract_notion_id (shared utility, was _extract_id)
 # ---------------------------------------------------------------------------
 
 
 class TestBlockExtractId:
-    """Tests for _extract_id (sync & async)."""
+    """Tests for the shared extract_notion_id utility."""
 
     def test_extract_id_plain(self, ops):
-        assert ops.blocks._extract_id("abc-def-123") == "abcdef123"
+        from notion_ops.utils.ids import extract_notion_id
+        assert extract_notion_id("abc-def-123") == "abcdef123"
 
     def test_extract_id_from_url_with_fragment(self, ops):
+        from notion_ops.utils.ids import extract_notion_id
         url = "https://www.notion.so/Page-Title-abc123#blockid456"
-        assert ops.blocks._extract_id(url) == "blockid456"
+        assert extract_notion_id(url) == "blockid456"

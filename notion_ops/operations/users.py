@@ -54,7 +54,7 @@ class UserOperations:
             User object
         """
         try:
-            response = self._client._notion.users.retrieve(user_id=user_id)
+            response = self._client.api.users.retrieve(user_id=user_id)
             return User.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="User", resource_id=user_id) from e
@@ -79,7 +79,7 @@ class UserOperations:
                 if start_cursor:
                     params["start_cursor"] = start_cursor
 
-                response = self._client._notion.users.list(**params)
+                response = self._client.api.users.list(**params)
 
                 for user_data in response.get("results", []):
                     users.append(User.from_api_response(user_data))
@@ -103,7 +103,7 @@ class UserOperations:
             User object for the bot
         """
         try:
-            response = self._client._notion.users.me()
+            response = self._client.api.users.me()
             return User.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="User") from e
@@ -127,7 +127,7 @@ class AsyncUserOperations:
             User object
         """
         try:
-            response = await self._client._notion.users.retrieve(user_id=user_id)
+            response = await self._client.api.users.retrieve(user_id=user_id)
             return User.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="User", resource_id=user_id) from e
@@ -152,7 +152,7 @@ class AsyncUserOperations:
                 if start_cursor:
                     params["start_cursor"] = start_cursor
 
-                response = await self._client._notion.users.list(**params)
+                response = await self._client.api.users.list(**params)
 
                 for user_data in response.get("results", []):
                     users.append(User.from_api_response(user_data))
@@ -176,7 +176,7 @@ class AsyncUserOperations:
             User object for the bot
         """
         try:
-            response = await self._client._notion.users.me()
+            response = await self._client.api.users.me()
             return User.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="User") from e

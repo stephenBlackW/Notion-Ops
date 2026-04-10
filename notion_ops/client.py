@@ -84,6 +84,11 @@ class NotionOps:
         self.blocks = BlockOperations(self)
         self.users = UserOperations(self)
 
+    @property
+    def api(self) -> Client:
+        """Public accessor for the underlying notion-client SDK client."""
+        return self._notion
+
     def search(
         self,
         query: str = "",
@@ -125,7 +130,7 @@ class NotionOps:
         if start_cursor:
             params["start_cursor"] = start_cursor
 
-        response = self._notion.search(**params)
+        response = self.api.search(**params)
 
         # Convert results to Page objects (filter out non-page results like databases)
         pages = []
@@ -186,11 +191,16 @@ class AsyncNotionOps:
         self.blocks = AsyncBlockOperations(self)
         self.users = AsyncUserOperations(self)
 
+    @property
+    def api(self) -> AsyncClient:
+        """Public accessor for the underlying notion-client SDK client."""
+        return self._notion
+
     async def __aenter__(self) -> "AsyncNotionOps":
         return self
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        await self._notion.aclose()
+        await self.api.aclose()
 
     async def search(
         self,
@@ -220,7 +230,7 @@ class AsyncNotionOps:
         if start_cursor:
             params["start_cursor"] = start_cursor
 
-        response = await self._notion.search(**params)
+        response = await self.api.search(**params)
 
         # Convert results to Page objects (filter out non-page results like databases)
         pages = []

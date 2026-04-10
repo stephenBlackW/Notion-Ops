@@ -260,22 +260,22 @@ class TestValidationErrorMapping:
 
 
 class TestGenericExceptionFallback:
-    """Non-APIResponseError exceptions still raise NotionOpsError."""
+    """Non-APIResponseError exceptions propagate directly (broad catch removed)."""
 
     def test_pages_get_generic_exception(self, notion_ops_client):
-        """A plain Exception in pages.get becomes NotionOpsError."""
+        """A plain Exception in pages.get propagates directly."""
         notion_ops_client._notion.pages.retrieve.side_effect = Exception(
             "Connection reset"
         )
 
-        with pytest.raises(NotionOpsError, match="Failed to retrieve page"):
+        with pytest.raises(Exception, match="Connection reset"):
             notion_ops_client.pages.get("page-001")
 
     def test_blocks_get_generic_exception(self, notion_ops_client):
-        """A plain Exception in blocks.get becomes NotionOpsError."""
+        """A plain Exception in blocks.get propagates directly."""
         notion_ops_client._notion.blocks.retrieve.side_effect = Exception(
             "Connection timeout"
         )
 
-        with pytest.raises(NotionOpsError, match="Failed to retrieve block"):
+        with pytest.raises(Exception, match="Connection timeout"):
             notion_ops_client.blocks.get("block-001")

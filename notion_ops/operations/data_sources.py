@@ -39,7 +39,7 @@ class DataSourceOperations:
 
         try:
             # Use database retrieve endpoint (data source ID == database ID in most cases)
-            response = self._client._notion.databases.retrieve(database_id=data_source_id)
+            response = self._client.api.databases.retrieve(database_id=data_source_id)
             return DataSource.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(
@@ -100,7 +100,7 @@ class DataSourceOperations:
             # Use raw request — the SDK's databases.query() doesn't exist.
             # As of Notion API v2025-09-03, the query endpoint moved from
             # /databases/{id}/query to /data_sources/{id}/query.
-            response = self._client._notion.request(
+            response = self._client.api.request(
                 path=f"data_sources/{data_source_id}/query",
                 method="POST",
                 body=body,
@@ -191,7 +191,7 @@ class DataSourceOperations:
         }
 
         try:
-            response = self._client._notion.databases.update(
+            response = self._client.api.databases.update(
                 database_id=data_source_id,
                 **update_data,
             )
@@ -216,7 +216,7 @@ class DataSourceOperations:
         data_source_id = extract_notion_id(data_source_id)
 
         try:
-            response = self._client._notion.databases.update(
+            response = self._client.api.databases.update(
                 database_id=data_source_id,
                 properties={property_name: None},
             )
@@ -273,7 +273,7 @@ class AsyncDataSourceOperations:
         data_source_id = extract_notion_id(data_source_id)
 
         try:
-            response = await self._client._notion.databases.retrieve(
+            response = await self._client.api.databases.retrieve(
                 database_id=data_source_id
             )
             return DataSource.from_api_response(response)
@@ -321,7 +321,7 @@ class AsyncDataSourceOperations:
             body["start_cursor"] = start_cursor
 
         try:
-            response = await self._client._notion.request(
+            response = await self._client.api.request(
                 path=f"data_sources/{data_source_id}/query",
                 method="POST",
                 body=body,
@@ -394,7 +394,7 @@ class AsyncDataSourceOperations:
         }
 
         try:
-            response = await self._client._notion.databases.update(
+            response = await self._client.api.databases.update(
                 database_id=data_source_id,
                 **update_data,
             )
@@ -419,7 +419,7 @@ class AsyncDataSourceOperations:
         data_source_id = extract_notion_id(data_source_id)
 
         try:
-            response = await self._client._notion.databases.update(
+            response = await self._client.api.databases.update(
                 database_id=data_source_id,
                 properties={property_name: None},
             )

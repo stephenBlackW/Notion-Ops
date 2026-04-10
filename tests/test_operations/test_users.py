@@ -66,11 +66,12 @@ class TestUserGet:
 
     @pytest.mark.asyncio
     async def test_get_user_generic_error(self, ops):
+        """Generic exceptions propagate directly (not wrapped in NotionOpsError)."""
         ops.setup_mock(
             "users.retrieve", side_effect=Exception("Unexpected error")
         )
 
-        with pytest.raises(NotionOpsError, match="Failed to retrieve user"):
+        with pytest.raises(Exception, match="Unexpected error"):
             await maybe_await(ops.users.get("user-err-001"))
 
 
@@ -143,9 +144,10 @@ class TestUserList:
 
     @pytest.mark.asyncio
     async def test_list_users_error(self, ops):
+        """Generic exceptions propagate directly (not wrapped in NotionOpsError)."""
         ops.setup_mock("users.list", side_effect=Exception("API error"))
 
-        with pytest.raises(NotionOpsError, match="Failed to list users"):
+        with pytest.raises(Exception, match="API error"):
             await maybe_await(ops.users.list())
 
 
@@ -174,11 +176,12 @@ class TestUserMe:
 
     @pytest.mark.asyncio
     async def test_me_error(self, ops):
+        """Generic exceptions propagate directly (not wrapped in NotionOpsError)."""
         ops.setup_mock(
             "users.me", side_effect=Exception("Authentication failed")
         )
 
-        with pytest.raises(NotionOpsError, match="Failed to get current user"):
+        with pytest.raises(Exception, match="Authentication failed"):
             await maybe_await(ops.users.me())
 
     @pytest.mark.asyncio

@@ -230,7 +230,11 @@ def mock_notion_client():
     mock_page.id = "test-page-id-1234"
     client.pages.create.return_value = mock_page
 
-    client._notion.blocks.children.append.return_value = {}
+    # Wire _notion and api to the same mock (mirrors the property in NotionOps)
+    sdk_mock = MagicMock()
+    sdk_mock.blocks.children.append.return_value = {}
+    client._notion = sdk_mock
+    client.api = sdk_mock
     return client
 
 

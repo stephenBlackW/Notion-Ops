@@ -638,7 +638,7 @@ def create_atom_page(
                     len(current_batch) >= _MAX_BLOCKS_PER_REQUEST
                     or current_size + block_size > _MAX_PAYLOAD_BYTES
                 ):
-                    notion_client._notion.blocks.children.append(
+                    notion_client.api.blocks.children.append(
                         block_id=page.id,
                         children=current_batch,
                     )
@@ -649,7 +649,7 @@ def create_atom_page(
                 current_size += block_size
 
             if current_batch:
-                notion_client._notion.blocks.children.append(
+                notion_client.api.blocks.children.append(
                     block_id=page.id,
                     children=current_batch,
                 )

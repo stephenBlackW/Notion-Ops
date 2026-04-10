@@ -99,7 +99,7 @@ class DatabaseOperations:
             create_data["cover"] = {"type": "external", "external": {"url": cover}}
 
         try:
-            response = self._client._notion.databases.create(**create_data)
+            response = self._client.api.databases.create(**create_data)
             return Database.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(
@@ -120,7 +120,7 @@ class DatabaseOperations:
         database_id = extract_notion_id(database_id)
 
         try:
-            response = self._client._notion.databases.retrieve(database_id=database_id)
+            response = self._client.api.databases.retrieve(database_id=database_id)
             return Database.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(
@@ -180,7 +180,7 @@ class DatabaseOperations:
             return self.get(database_id)
 
         try:
-            response = self._client._notion.databases.update(
+            response = self._client.api.databases.update(
                 database_id=database_id,
                 **update_data,
             )
@@ -238,7 +238,7 @@ class DatabaseOperations:
         database_id = extract_notion_id(database_id)
 
         try:
-            response = self._client._notion.databases.update(
+            response = self._client.api.databases.update(
                 database_id=database_id,
                 archived=True,
             )
@@ -317,7 +317,7 @@ class AsyncDatabaseOperations:
             create_data["cover"] = {"type": "external", "external": {"url": cover}}
 
         try:
-            response = await self._client._notion.databases.create(**create_data)
+            response = await self._client.api.databases.create(**create_data)
             return Database.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(
@@ -338,7 +338,7 @@ class AsyncDatabaseOperations:
         database_id = extract_notion_id(database_id)
 
         try:
-            response = await self._client._notion.databases.retrieve(database_id=database_id)
+            response = await self._client.api.databases.retrieve(database_id=database_id)
             return Database.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(
@@ -398,7 +398,7 @@ class AsyncDatabaseOperations:
             return await self.get(database_id)
 
         try:
-            response = await self._client._notion.databases.update(
+            response = await self._client.api.databases.update(
                 database_id=database_id,
                 **update_data,
             )
@@ -454,7 +454,7 @@ class AsyncDatabaseOperations:
         database_id = extract_notion_id(database_id)
 
         try:
-            response = await self._client._notion.databases.update(
+            response = await self._client.api.databases.update(
                 database_id=database_id,
                 archived=True,
             )

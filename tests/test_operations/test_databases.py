@@ -61,9 +61,10 @@ class TestDatabaseCreate:
 
     @pytest.mark.asyncio
     async def test_create_database_error(self, ops):
+        """Generic exceptions propagate directly (not wrapped in NotionOpsError)."""
         ops.setup_mock("databases.create", side_effect=Exception("Forbidden"))
 
-        with pytest.raises(NotionOpsError, match="Failed to create database"):
+        with pytest.raises(Exception, match="Forbidden"):
             await maybe_await(
                 ops.databases.create(
                     parent_id="page-parent-001", title="Failing DB"
@@ -128,11 +129,12 @@ class TestDatabaseGet:
 
     @pytest.mark.asyncio
     async def test_get_database_generic_error(self, ops):
+        """Generic exceptions propagate directly (not wrapped in NotionOpsError)."""
         ops.setup_mock(
             "databases.retrieve", side_effect=Exception("Unexpected error")
         )
 
-        with pytest.raises(NotionOpsError, match="Failed to retrieve database"):
+        with pytest.raises(Exception, match="Unexpected error"):
             await maybe_await(ops.databases.get("db-err-001"))
 
 
@@ -210,11 +212,12 @@ class TestDatabaseArchive:
 
     @pytest.mark.asyncio
     async def test_archive_database_error(self, ops):
+        """Generic exceptions propagate directly (not wrapped in NotionOpsError)."""
         ops.setup_mock(
             "databases.update", side_effect=Exception("Cannot archive")
         )
 
-        with pytest.raises(NotionOpsError, match="Failed to archive database"):
+        with pytest.raises(Exception, match="Cannot archive"):
             await maybe_await(ops.databases.archive("db-fail-001"))
 
 
@@ -248,11 +251,13 @@ class TestDatabaseListDataSources:
 
 
 class TestDatabaseExtractId:
-    """Tests for _extract_id (sync & async)."""
+    """Tests for the shared extract_notion_id utility."""
 
     def test_extract_id_plain(self, ops):
-        assert ops.databases._extract_id("2d8d-371a-79f4") == "2d8d371a79f4"
+        from notion_ops.utils.ids import extract_notion_id
+        assert extract_notion_id("2d8d-371a-79f4") == "2d8d371a79f4"
 
     def test_extract_id_from_url(self, ops):
+        from notion_ops.utils.ids import extract_notion_id
         url = "https://www.notion.so/workspace/My-Database-abcdef1234567890abcdef1234567890"
-        assert ops.databases._extract_id(url) == "abcdef1234567890abcdef1234567890"
+        assert extract_notion_id(url) == "abcdef1234567890abcdef1234567890"

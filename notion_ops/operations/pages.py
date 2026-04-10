@@ -69,7 +69,7 @@ class PageOperations:
         )
 
         try:
-            response = self._client._notion.pages.create(**page_create.to_api_format())
+            response = self._client.api.pages.create(**page_create.to_api_format())
             return Page.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="Page", resource_id=parent_id) from e
@@ -93,7 +93,7 @@ class PageOperations:
         page_id = extract_notion_id(page_id)
 
         try:
-            response = self._client._notion.pages.retrieve(page_id=page_id)
+            response = self._client.api.pages.retrieve(page_id=page_id)
             return Page.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="Page", resource_id=page_id) from e
@@ -145,7 +145,7 @@ class PageOperations:
             return self.get(page_id)
 
         try:
-            response = self._client._notion.pages.update(
+            response = self._client.api.pages.update(
                 page_id=page_id,
                 **update_data,
             )
@@ -220,7 +220,7 @@ class PageOperations:
         parent_key = "data_source_id" if parent_type == "data_source" else "page_id"
 
         try:
-            response = self._client._notion.pages.move(
+            response = self._client.api.pages.move(
                 page_id=page_id,
                 parent={
                     "type": parent_key,
@@ -246,7 +246,7 @@ class PageOperations:
         page_id = extract_notion_id(page_id)
 
         try:
-            response = self._client._notion.pages.properties.retrieve(
+            response = self._client.api.pages.properties.retrieve(
                 page_id=page_id,
                 property_id=property_id,
             )
@@ -297,7 +297,7 @@ class AsyncPageOperations:
         )
 
         try:
-            response = await self._client._notion.pages.create(**page_create.to_api_format())
+            response = await self._client.api.pages.create(**page_create.to_api_format())
             return Page.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="Page", resource_id=parent_id) from e
@@ -316,7 +316,7 @@ class AsyncPageOperations:
         page_id = extract_notion_id(page_id)
 
         try:
-            response = await self._client._notion.pages.retrieve(page_id=page_id)
+            response = await self._client.api.pages.retrieve(page_id=page_id)
             return Page.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="Page", resource_id=page_id) from e
@@ -358,7 +358,7 @@ class AsyncPageOperations:
             return await self.get(page_id)
 
         try:
-            response = await self._client._notion.pages.update(
+            response = await self._client.api.pages.update(
                 page_id=page_id,
                 **update_data,
             )
@@ -429,7 +429,7 @@ class AsyncPageOperations:
         parent_key = "data_source_id" if parent_type == "data_source" else "page_id"
 
         try:
-            response = await self._client._notion.pages.move(
+            response = await self._client.api.pages.move(
                 page_id=page_id,
                 parent={
                     "type": parent_key,
@@ -455,7 +455,7 @@ class AsyncPageOperations:
         page_id = extract_notion_id(page_id)
 
         try:
-            response = await self._client._notion.pages.properties.retrieve(
+            response = await self._client.api.pages.properties.retrieve(
                 page_id=page_id,
                 property_id=property_id,
             )

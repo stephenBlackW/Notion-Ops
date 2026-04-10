@@ -54,11 +54,12 @@ class TestDataSourceGet:
 
     @pytest.mark.asyncio
     async def test_get_data_source_generic_error(self, ops):
+        """Generic exceptions propagate directly (not wrapped in NotionOpsError)."""
         ops.setup_mock(
             "databases.retrieve", side_effect=Exception("Unexpected error")
         )
 
-        with pytest.raises(NotionOpsError, match="Failed to retrieve data source"):
+        with pytest.raises(Exception, match="Unexpected error"):
             await maybe_await(ops.data_sources.get("ds-err-001"))
 
 
@@ -121,11 +122,12 @@ class TestDataSourceQuery:
 
     @pytest.mark.asyncio
     async def test_query_data_source_generic_error(self, ops):
+        """Generic exceptions propagate directly (not wrapped in NotionOpsError)."""
         ops.setup_mock(
             "request", side_effect=Exception("Internal server error")
         )
 
-        with pytest.raises(NotionOpsError, match="Failed to query data source"):
+        with pytest.raises(Exception, match="Internal server error"):
             await maybe_await(ops.data_sources.query("ds-err-001"))
 
     @pytest.mark.asyncio
@@ -362,14 +364,16 @@ class TestDataSourceDeleteProperty:
 
 
 class TestDataSourceExtractId:
-    """Tests for _extract_id (sync & async)."""
+    """Tests for the shared extract_notion_id utility."""
 
     def test_extract_id_plain(self, ops):
-        assert ops.data_sources._extract_id("2d8d-371a-79f4") == "2d8d371a79f4"
+        from notion_ops.utils.ids import extract_notion_id
+        assert extract_notion_id("2d8d-371a-79f4") == "2d8d371a79f4"
 
     def test_extract_id_from_url(self, ops):
+        from notion_ops.utils.ids import extract_notion_id
         url = "https://www.notion.so/workspace/DB-Title-abcdef1234567890abcdef1234567890"
         assert (
-            ops.data_sources._extract_id(url)
+            extract_notion_id(url)
             == "abcdef1234567890abcdef1234567890"
         )
