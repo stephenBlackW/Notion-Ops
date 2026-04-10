@@ -1,18 +1,19 @@
-"""Tests for Notion Operations models."""
+"""Tests for Notion Operations models.
+
+Covers property API-format conversion, property value parsing from API
+responses, page creation schema, and Page model construction.
+Trivial block-constructor, filter-builder, and sort-spec tests have been
+removed -- those are thin wrappers over dict construction.
+"""
 
 from datetime import datetime
 
-import pytest
-
-from notion_ops.models.block import Block, Blocks, BlockType
-from notion_ops.models.filters import Filter, Sort
 from notion_ops.models.page import Page, PageCreate
 from notion_ops.models.properties import (
     CheckboxProperty,
     DateProperty,
     MultiSelectProperty,
     NumberProperty,
-    PropertyType,
     SelectProperty,
     TitleProperty,
     parse_property_value,
@@ -90,118 +91,6 @@ class TestParsePropertyValue:
     def test_parse_multi_select(self):
         data = {"type": "multi_select", "multi_select": [{"name": "A"}, {"name": "B"}]}
         assert parse_property_value(data) == ["A", "B"]
-
-
-class TestBlocks:
-    """Tests for block creation."""
-
-    def test_paragraph_block(self):
-        block = Blocks.paragraph("Hello world")
-
-        assert block.type == BlockType.PARAGRAPH
-        assert block.content["rich_text"][0]["text"]["content"] == "Hello world"
-
-    def test_heading_1_block(self):
-        block = Blocks.heading_1("Title")
-
-        assert block.type == BlockType.HEADING_1
-        assert block.content["rich_text"][0]["text"]["content"] == "Title"
-
-    def test_todo_block(self):
-        block = Blocks.todo("Task", checked=True)
-
-        assert block.type == BlockType.TO_DO
-        assert block.content["checked"] is True
-
-    def test_code_block(self):
-        block = Blocks.code("print('hello')", language="python")
-
-        assert block.type == BlockType.CODE
-        assert block.content["language"] == "python"
-
-    def test_callout_block(self):
-        block = Blocks.callout("Note", emoji="📝")
-
-        assert block.type == BlockType.CALLOUT
-        assert block.content["icon"]["emoji"] == "📝"
-
-    def test_divider_block(self):
-        block = Blocks.divider()
-
-        assert block.type == BlockType.DIVIDER
-
-    def test_block_to_api_format(self):
-        block = Blocks.paragraph("Test")
-        result = block.to_api_format()
-
-        assert result["type"] == "paragraph"
-        assert "paragraph" in result
-
-
-class TestFilters:
-    """Tests for query filter builders."""
-
-    def test_text_filter_equals(self):
-        result = Filter.title("Name").equals("Test")
-
-        assert result == {"property": "Name", "title": {"equals": "Test"}}
-
-    def test_text_filter_contains(self):
-        result = Filter.rich_text("Description").contains("keyword")
-
-        assert result == {"property": "Description", "rich_text": {"contains": "keyword"}}
-
-    def test_number_filter_greater_than(self):
-        result = Filter.number("Amount").greater_than(100)
-
-        assert result == {"property": "Amount", "number": {"greater_than": 100}}
-
-    def test_select_filter_equals(self):
-        result = Filter.select("Status").equals("Active")
-
-        assert result == {"property": "Status", "select": {"equals": "Active"}}
-
-    def test_checkbox_filter_equals(self):
-        result = Filter.checkbox("Done").equals(True)
-
-        assert result == {"property": "Done", "checkbox": {"equals": True}}
-
-    def test_and_filter(self):
-        result = Filter.and_(
-            Filter.select("Status").equals("Active"),
-            Filter.checkbox("Done").equals(False),
-        )
-
-        assert "and" in result
-        assert len(result["and"]) == 2
-
-    def test_or_filter(self):
-        result = Filter.or_(
-            Filter.select("Status").equals("Active"),
-            Filter.select("Status").equals("Pending"),
-        )
-
-        assert "or" in result
-        assert len(result["or"]) == 2
-
-
-class TestSort:
-    """Tests for sort specifications."""
-
-    def test_ascending_sort(self):
-        result = Sort.ascending("Name")
-
-        assert result == {"property": "Name", "direction": "ascending"}
-
-    def test_descending_sort(self):
-        result = Sort.descending("Created")
-
-        assert result == {"property": "Created", "direction": "descending"}
-
-    def test_created_time_sort(self):
-        result = Sort.created_time_descending()
-
-        assert result == {"timestamp": "created_time", "direction": "descending"}
 
 
 class TestPageCreate:

@@ -1,6 +1,5 @@
 """Tests for Notion Operations utility functions."""
 
-import pytest
 
 from notion_ops.utils.rich_text import (
     extract_plain_text,
