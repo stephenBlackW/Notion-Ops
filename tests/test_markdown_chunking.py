@@ -13,9 +13,9 @@ from notion_ops.utils.markdown import (
     _SAFE_CHAR_LIMIT,
     _estimate_block_size,
     _find_split_point,
-    create_atom_page,
     markdown_to_blocks,
 )
+from notion_ops.utils.atoms import create_atom_page
 
 # ---------------------------------------------------------------------------
 # _find_split_point

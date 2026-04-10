@@ -37,7 +37,7 @@ from notion_ops.models.properties import (
     TitleProperty,
     URLProperty,
 )
-from notion_ops.utils.markdown import create_atom_page
+from notion_ops.utils.atoms import create_atom_page
 
 __version__ = "0.1.0"
 
