@@ -257,3 +257,78 @@ class FileUploads:
             content_type=ctype,
         )
         return upload_id
+
+    # ------------------------------------------------------------------
+    # Block payload helpers
+    # ------------------------------------------------------------------
+
+    def image_block(
+        self,
+        upload_id: str,
+        *,
+        caption: str | None = None,
+    ) -> dict[str, Any]:
+        """Build an ``image`` block payload backed by a ``file_upload``.
+
+        The returned dict is shaped to be passed directly to the Notion
+        ``blocks.children.append`` API as a child element.
+
+        Args:
+            upload_id: The ``id`` returned by :meth:`upload_file` /
+                :meth:`create`.
+            caption: Optional caption text.
+
+        Returns:
+            A dict like::
+
+                {
+                    "object": "block",
+                    "type": "image",
+                    "image": {
+                        "type": "file_upload",
+                        "file_upload": {"id": upload_id},
+                        "caption": [...],   # only when caption supplied
+                    },
+                }
+        """
+        image_payload: dict[str, Any] = {
+            "type": "file_upload",
+            "file_upload": {"id": upload_id},
+        }
+        if caption:
+            image_payload["caption"] = [
+                {
+                    "type": "text",
+                    "text": {"content": caption},
+                }
+            ]
+
+        return {
+            "object": "block",
+            "type": "image",
+            "image": image_payload,
+        }
+
+    def upload_and_attach(
+        self,
+        path: str | Path,
+        *,
+        caption: str | None = None,
+    ) -> dict[str, Any]:
+        """Upload a local file and return the matching image block payload.
+
+        Convenience wrapper around :meth:`upload_file` and
+        :meth:`image_block`. The returned dict is ready to append via
+        ``client.api.blocks.children.append`` or to wrap in a
+        :class:`notion_ops.models.block.Block` for the higher-level
+        ``BlockOperations.append`` flow.
+
+        Args:
+            path: Path to a local file (PNG, JPG, PDF, ...).
+            caption: Optional caption text to attach to the image block.
+
+        Returns:
+            A block payload dict (see :meth:`image_block`).
+        """
+        upload_id = self.upload_file(path)
+        return self.image_block(upload_id, caption=caption)
