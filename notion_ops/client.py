@@ -10,6 +10,7 @@ from notion_ops.models.page import Page
 from notion_ops.operations.blocks import AsyncBlockOperations, BlockOperations
 from notion_ops.operations.data_sources import AsyncDataSourceOperations, DataSourceOperations
 from notion_ops.operations.databases import AsyncDatabaseOperations, DatabaseOperations
+from notion_ops.operations.file_uploads import FileUploads
 from notion_ops.operations.pages import AsyncPageOperations, PageOperations
 from notion_ops.operations.users import AsyncUserOperations, UserOperations
 
@@ -77,12 +78,17 @@ class NotionOps:
             notion_version=notion_version,
         )
 
+        # Track Notion-Version so file_uploads can build its own headers
+        # for direct multipart POSTs against pre-signed upload URLs.
+        self._notion_version = notion_version
+
         # Initialize operation handlers
         self.pages = PageOperations(self)
         self.databases = DatabaseOperations(self)
         self.data_sources = DataSourceOperations(self)
         self.blocks = BlockOperations(self)
         self.users = UserOperations(self)
+        self.file_uploads = FileUploads(self)
 
     @property
     def api(self) -> Client:
@@ -184,12 +190,18 @@ class AsyncNotionOps:
             notion_version=notion_version,
         )
 
+        # Track Notion-Version for file upload header construction.
+        self._notion_version = notion_version
+
         # Initialize async operation handlers
         self.pages = AsyncPageOperations(self)
         self.databases = AsyncDatabaseOperations(self)
         self.data_sources = AsyncDataSourceOperations(self)
         self.blocks = AsyncBlockOperations(self)
         self.users = AsyncUserOperations(self)
+        # File uploads are exposed even on the async client; the upload flow
+        # itself is synchronous (direct multipart POST to a pre-signed URL).
+        self.file_uploads = FileUploads(self)
 
     @property
     def api(self) -> AsyncClient:

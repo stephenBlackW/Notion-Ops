@@ -284,6 +284,25 @@ class Blocks:
         return Block(type=BlockType.IMAGE, content=content)
 
     @staticmethod
+    def image_file_upload(upload_id: str, caption: str | None = None) -> Block:
+        """Create an image block backed by a Notion ``file_upload`` reference.
+
+        Pair with :class:`notion_ops.operations.file_uploads.FileUploads` to
+        upload local PNG/JPG/GIF/SVG figures and embed them into pages.
+
+        Args:
+            upload_id: The ``id`` returned by the file upload flow.
+            caption: Optional caption text.
+        """
+        content: dict[str, Any] = {
+            "type": "file_upload",
+            "file_upload": {"id": upload_id},
+        }
+        if caption:
+            content["caption"] = _make_rich_text(caption)
+        return Block(type=BlockType.IMAGE, content=content)
+
+    @staticmethod
     def video(url: str, caption: str | None = None) -> Block:
         """Create an external video block."""
         content: dict[str, Any] = {
