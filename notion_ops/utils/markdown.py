@@ -55,101 +55,137 @@ def _estimate_block_size(block: dict[str, Any]) -> int:
         return 1000  # conservative default
 
 
+# Inline markdown -> Notion rich_text.
+# Emphasis rules follow CommonMark/GitHub closely enough for real docs:
+#   - bold/italic content may not begin or end with whitespace, so stray
+#     delimiters ("a * b") and padded ones ("** x **") stay literal;
+#   - underscore emphasis is not intraword, so identifiers like
+#     ``snake_case_name`` and ``capex_per_kw`` are never italicised.
+_INLINE_PATTERN = re.compile(
+    r'\*\*(?P<bold_a>\S(?:.*?\S)?)\*\*'                # **bold**
+    r'|(?<!\w)__(?P<bold_u>\S(?:.*?\S)?)__(?!\w)'      # __bold__
+    r'|~~(?P<strike>\S(?:.*?\S)?)~~'                   # ~~strikethrough~~
+    r'|\*(?!\*)(?P<ital_a>\S(?:.*?\S)?)\*(?!\*)'       # *italic*
+    r'|(?<!\w)_(?P<ital_u>\S(?:.*?\S)?)_(?!\w)'        # _italic_
+    r'|`(?P<code>[^`]+?)`'                             # `code`
+    r'|\[(?P<link_t>[^\]]+)\]\((?P<link_u>[^)]+)\)'    # [text](url)
+)
+
+
+def _text_seg(content: str, **flags: bool) -> dict[str, Any]:
+    """A rich_text text segment; only true annotation flags are emitted."""
+    seg: dict[str, Any] = {"type": "text", "text": {"content": content}}
+    annotations = {name: True for name, on in flags.items() if on}
+    if annotations:
+        seg["annotations"] = annotations
+    return seg
+
+
+def _link_seg(label: str, url: str) -> dict[str, Any]:
+    return {"type": "text", "text": {"content": label, "link": {"url": url}}}
+
+
 def _parse_inline_formatting(text: str) -> list[dict[str, Any]]:
     """
-    Parse inline markdown formatting into Notion rich_text array.
+    Parse inline markdown formatting into a Notion rich_text array.
 
-    Supports:
-    - **bold**
-    - *italic* or _italic_
-    - `code`
-    - [links](url)
-    - ~~strikethrough~~
+    Supports **bold**, __bold__, *italic*, _italic_, ~~strikethrough~~,
+    `code`, and [links](url). Plain runs between matches are preserved.
+    Never emits a segment with empty or ``None`` content.
     """
     if not text:
         return []
 
     rich_text: list[dict[str, Any]] = []
-
-    # Pattern to match markdown inline formatting
-    # Order matters: bold before italic (** before *)
-    pattern = (
-        r'(\*\*(.+?)\*\*|__(.+?)__|~~(.+?)~~'
-        r'|\*(.+?)\*|_(.+?)_|`(.+?)`'
-        r'|\[([^\]]+)\]\(([^)]+)\))'
-    )
-
     last_end = 0
-    for match in re.finditer(pattern, text):
-        # Add plain text before this match
+    for match in _INLINE_PATTERN.finditer(text):
         if match.start() > last_end:
-            plain = text[last_end:match.start()]
-            if plain:
-                rich_text.append({
-                    "type": "text",
-                    "text": {"content": plain}
-                })
+            rich_text.append(_text_seg(text[last_end:match.start()]))
 
-        full_match = match.group(0)
-
-        # Determine formatting type
-        if full_match.startswith('**') or full_match.startswith('__'):
-            # Bold
-            content = match.group(2) or match.group(3)
-            rich_text.append({
-                "type": "text",
-                "text": {"content": content},
-                "annotations": {"bold": True}
-            })
-        elif full_match.startswith('~~'):
-            # Strikethrough
-            content = match.group(4)
-            rich_text.append({
-                "type": "text",
-                "text": {"content": content},
-                "annotations": {"strikethrough": True}
-            })
-        elif full_match.startswith('*') or full_match.startswith('_'):
-            # Italic (single * or _)
-            content = match.group(5) or match.group(6)
-            rich_text.append({
-                "type": "text",
-                "text": {"content": content},
-                "annotations": {"italic": True}
-            })
-        elif full_match.startswith('`'):
-            # Inline code
-            content = match.group(7)
-            rich_text.append({
-                "type": "text",
-                "text": {"content": content},
-                "annotations": {"code": True}
-            })
-        elif full_match.startswith('['):
-            # Link
-            link_text = match.group(8)
-            link_url = match.group(9)
-            rich_text.append({
-                "type": "text",
-                "text": {"content": link_text, "link": {"url": link_url}}
-            })
+        if match.group('bold_a') is not None:
+            rich_text.append(_text_seg(match.group('bold_a'), bold=True))
+        elif match.group('bold_u') is not None:
+            rich_text.append(_text_seg(match.group('bold_u'), bold=True))
+        elif match.group('strike') is not None:
+            rich_text.append(_text_seg(match.group('strike'), strikethrough=True))
+        elif match.group('ital_a') is not None:
+            rich_text.append(_text_seg(match.group('ital_a'), italic=True))
+        elif match.group('ital_u') is not None:
+            rich_text.append(_text_seg(match.group('ital_u'), italic=True))
+        elif match.group('code') is not None:
+            rich_text.append(_text_seg(match.group('code'), code=True))
+        elif match.group('link_t') is not None:
+            rich_text.append(_link_seg(match.group('link_t'), match.group('link_u')))
 
         last_end = match.end()
 
-    # Add remaining plain text
     if last_end < len(text):
-        remaining = text[last_end:]
-        if remaining:
-            rich_text.append({
-                "type": "text",
-                "text": {"content": remaining}
-            })
+        rich_text.append(_text_seg(text[last_end:]))
 
-    # If no formatting found, return plain text
     if not rich_text:
-        return [{"type": "text", "text": {"content": text}}]
+        return [_text_seg(text)]
 
     return rich_text
+
+
+def _clone_seg(seg: dict[str, Any], content: str) -> dict[str, Any]:
+    """Copy a rich_text segment with new *content*, preserving formatting."""
+    new: dict[str, Any] = {"type": "text", "text": {"content": content}}
+    link = seg["text"].get("link")
+    if link is not None:
+        new["text"]["link"] = link
+    if "annotations" in seg:
+        new["annotations"] = dict(seg["annotations"])
+    return new
+
+
+def _chunk_rich_text(
+    rich_text: list[dict[str, Any]], limit: int
+) -> list[list[dict[str, Any]]]:
+    """Pack rich_text segments into blocks each <= *limit* characters.
+
+    Splits happen between segments, or within an over-long segment at a
+    natural boundary — never inside a parsed span — so emphasis added by
+    :func:`_parse_inline_formatting` survives the Notion ~2000-char limit.
+    """
+    result: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    current_len = 0
+
+    for seg in rich_text:
+        content = seg["text"]["content"]
+        while len(content) > limit:
+            split_at = _find_split_point(content, limit)
+            head = content[:split_at].rstrip()
+            if head:
+                if current:
+                    result.append(current)
+                    current, current_len = [], 0
+                result.append([_clone_seg(seg, head)])
+            content = content[split_at:].lstrip()
+        if not content:
+            continue
+        if current and current_len + len(content) > limit:
+            result.append(current)
+            current, current_len = [], 0
+        current.append(_clone_seg(seg, content))
+        current_len += len(content)
+
+    if current:
+        result.append(current)
+    return result
+
+
+def _force_bold(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return *segments* with bold forced on (used for table headers)."""
+    out: list[dict[str, Any]] = []
+    for seg in segments:
+        new = _clone_seg(seg, seg["text"]["content"])
+        annotations = dict(new.get("annotations", {}))
+        annotations["bold"] = True
+        new["annotations"] = annotations
+        out.append(new)
+    return out
 
 
 def _make_rich_text_formatted(text: str) -> list[dict[str, Any]]:
@@ -210,9 +246,8 @@ def _parse_table(lines: list[str], start_idx: int) -> tuple[Block | None, int]:
     # Create table rows with rich text formatting
     rows: list[Block] = []
 
-    # Header row
-    header_rich_text = [[{"type": "text", "text": {"content": cell}, "annotations": {"bold": True}}]
-                        for cell in header_cells]
+    # Header row (parse inline formatting, then force bold)
+    header_rich_text = [_force_bold(_parse_inline_formatting(cell)) for cell in header_cells]
     rows.append(Block(
         type=BlockType.TABLE_ROW,
         content={"cells": header_rich_text}
@@ -294,22 +329,13 @@ def markdown_to_blocks(markdown: str) -> list[dict[str, Any]]:
         if current_text:
             text = '\n'.join(current_text).strip()
             if text:
-                # Handle text length limits (Notion max ~2000 chars per block)
-                while len(text) > _SAFE_CHAR_LIMIT:
-                    split_at = _find_split_point(text, _SAFE_CHAR_LIMIT)
-                    chunk = text[:split_at].rstrip()
-                    if chunk:
-                        rich_text = _parse_inline_formatting(chunk)
-                        blocks.append(Block(
-                            type=BlockType.PARAGRAPH,
-                            content={"rich_text": rich_text}
-                        ))
-                    text = text[split_at:].lstrip()
-                if text:
-                    rich_text = _parse_inline_formatting(text)
+                # Parse inline formatting first, then split at the Notion
+                # ~2000-char block limit between spans (never mid-span).
+                rich_text = _parse_inline_formatting(text)
+                for chunk in _chunk_rich_text(rich_text, _SAFE_CHAR_LIMIT):
                     blocks.append(Block(
                         type=BlockType.PARAGRAPH,
-                        content={"rich_text": rich_text}
+                        content={"rich_text": chunk}
                     ))
             current_text = []
 
@@ -391,6 +417,18 @@ def markdown_to_blocks(markdown: str) -> list[dict[str, Any]]:
         if line.startswith('### '):
             flush_text()
             heading_text = line[4:].strip()
+            rich_text = _parse_inline_formatting(heading_text)
+            blocks.append(Block(
+                type=BlockType.HEADING_3,
+                content={"rich_text": rich_text, "is_toggleable": False}
+            ))
+            idx += 1
+            continue
+
+        # Heading 4+ (Notion supports only three heading levels) -> heading_3
+        if re.match(r'^#{4,}\s', line):
+            flush_text()
+            heading_text = re.sub(r'^#{4,}\s+', '', line).strip()
             rich_text = _parse_inline_formatting(heading_text)
             blocks.append(Block(
                 type=BlockType.HEADING_3,
