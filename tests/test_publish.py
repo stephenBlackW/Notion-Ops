@@ -201,6 +201,77 @@ class TestExecution:
         assert all(c["children"] for c in client.calls)
 
 
+def _table(n_rows: int) -> dict[str, Any]:
+    rows = [
+        {
+            "object": "block",
+            "type": "table_row",
+            "table_row": {"cells": [[{"type": "text", "text": {"content": str(i)}}]]},
+        }
+        for i in range(n_rows)
+    ]
+    return {
+        "object": "block",
+        "type": "table",
+        "table": {"table_width": 1, "has_column_header": True, "children": rows},
+    }
+
+
+class TestTableSplitting:
+    def test_small_table_inlined(self):
+        plan = build_publish_plan([_table(10)])
+        assert count_requests(plan) == 1
+        assert len(plan[0].payload[0]["table"]["children"]) == 10
+        assert plan[0].followups == []
+
+    def test_large_table_splits_rows(self):
+        plan = build_publish_plan([_table(150)])
+        assert count_requests(plan) == 2
+        head = plan[0].payload[0]["table"]["children"]
+        # First request keeps room for the table block itself (<= 99 rows).
+        assert len(head) <= 99
+        assert len(plan[0].followups) == 1
+        # Every row is accounted for across head + follow-up batches.
+        deferred = sum(
+            len(r.payload) for r in plan[0].followups[0].requests
+        )
+        assert len(head) + deferred == 150
+
+    def test_no_request_exceeds_100_rows(self):
+        plan = build_publish_plan([_table(250)])
+
+        def check(requests):
+            for req in requests:
+                total = sum(_block_count(b) for b in req.payload)
+                assert total <= 100
+                for fu in req.followups:
+                    check(fu.requests)
+
+        def _block_count(block: dict[str, Any]) -> int:
+            body = block.get(block.get("type", ""), {})
+            kids = body.get("children", []) if isinstance(body, dict) else []
+            return 1 + sum(_block_count(k) for k in kids)
+
+        check(plan)
+
+    def test_big_table_in_toggle_floats_to_top_level(self):
+        toggle = _toggle("T", [_table(150)])
+        plan = build_publish_plan([toggle])
+        # Toggle can't inline the oversized table -> it defers; the table is
+        # split once it is top-level under the toggle's id.
+        assert count_requests(plan) == 3
+        assert "children" not in plan[0].payload[0]["toggle"]
+
+    def test_execute_appends_rows_to_table_id(self):
+        client = FakeClient()
+        result = publish_block_tree(client, "11111111-1111-1111-1111-111111111111", [_table(150)])
+        assert result.request_count == 2
+        # First call creates the table (top-level); second appends rows to the
+        # returned table id (blk-0-0), not the page.
+        assert client.calls[1]["block_id"] == "blk-0-0"
+        assert all(c["type"] == "table_row" for c in client.calls[1]["children"])
+
+
 def test_payload_byte_constant_is_reasonable():
     # Guard against an accidental tiny cap that would explode request counts.
     assert _MAX_PAYLOAD_BYTES >= 100_000

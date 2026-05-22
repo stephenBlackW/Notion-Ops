@@ -14,10 +14,12 @@ follow-up request, and that follow-up can only attach to a block whose ID we
 got back — i.e. a block that was top-level in some earlier request.
 
 This module turns a nested tree into the minimum number of append requests
-that respects those limits: sub-trees with height <= the inline limit (and
-within the size budget) are sent inline; taller/larger ones have their
-children stripped and deferred into follow-up requests keyed, by index, to the
-parent block IDs returned by the preceding append. Top-level siblings are
+that respects those limits: sub-trees that fit every limit (nesting depth,
+per-array child count, total block count, payload size) are sent inline;
+larger ones have their children stripped and deferred into follow-up requests
+keyed, by index, to the parent block IDs returned by the preceding append. A
+table with more rows than fit in one request is created with its first rows
+inline and the remaining rows appended to its own ID. Top-level siblings are
 batched up to the 100-block and payload-size caps.
 """
 
@@ -107,6 +109,99 @@ def _without_children(block: dict[str, Any]) -> dict[str, Any]:
     return new
 
 
+def _with_children(
+    block: dict[str, Any], children: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """A shallow copy of *block* whose inline ``children`` are *children*."""
+    btype = block.get("type", "")
+    new = dict(block)
+    body = block.get(btype)
+    if isinstance(body, dict):
+        new_body = dict(body)
+        new_body["children"] = children
+        new[btype] = new_body
+    return new
+
+
+def _total_blocks(block: dict[str, Any]) -> int:
+    """Total number of blocks in a subtree, including the block itself."""
+    return 1 + sum(_total_blocks(child) for child in _children_of(block))
+
+
+def _max_children_count(block: dict[str, Any]) -> int:
+    """Largest single ``children`` array anywhere in the subtree."""
+    children = _children_of(block)
+    maximum = len(children)
+    for child in children:
+        maximum = max(maximum, _max_children_count(child))
+    return maximum
+
+
+def _can_inline(
+    block: dict[str, Any],
+    max_inline_depth: int,
+    max_blocks: int,
+    max_bytes: int,
+) -> bool:
+    """Whether *block*'s whole subtree fits inline in one append request.
+
+    Requires it to be shallow enough (``max_inline_depth``), to keep every
+    ``children`` array within the per-parent cap, to fit the total-block
+    budget, and to stay within the payload-size budget.
+    """
+    return (
+        _height(block) <= max_inline_depth
+        and _max_children_count(block) <= max_blocks
+        and _total_blocks(block) <= max_blocks
+        and _estimate_block_size(block) <= max_bytes
+    )
+
+
+def _batch_rows(
+    rows: list[dict[str, Any]], max_rows: int, max_bytes: int
+) -> list[list[dict[str, Any]]]:
+    """Group table rows into batches within the count and size caps."""
+    batches: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    size = 0
+    for row in rows:
+        row_size = _estimate_block_size(row)
+        if current and (len(current) >= max_rows or size + row_size > max_bytes):
+            batches.append(current)
+            current = []
+            size = 0
+        current.append(row)
+        size += row_size
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _split_table(
+    table: dict[str, Any], max_blocks: int, max_bytes: int
+) -> tuple[dict[str, Any], list[AppendRequest]]:
+    """Split a table that is too large for one request.
+
+    A table is created with its first batch of rows inline (it must stay a
+    top-level block so its ID is returned), and the remaining rows are appended
+    to that table ID in follow-up requests. A table is never emitted with zero
+    rows.
+    """
+    rows = _children_of(table)
+    # The first batch shares the request with the table block itself, so leave
+    # room for it under the per-request block budget.
+    head_limit = max(1, max_blocks - 1)
+    head_batches = _batch_rows(rows, head_limit, max_bytes)
+    head = head_batches[0] if head_batches else []
+    rest = rows[len(head):]
+    inlined = _with_children(table, head)
+    followups = [
+        AppendRequest(payload=batch)
+        for batch in _batch_rows(rest, max_blocks, max_bytes)
+    ]
+    return inlined, followups
+
+
 def build_publish_plan(
     blocks: list[dict[str, Any]],
     *,
@@ -134,40 +229,48 @@ def _plan_append(
     payload: list[dict[str, Any]] = []
     followups: list[Followup] = []
     size = 0
+    blocks = 0
 
     def flush() -> None:
-        nonlocal payload, followups, size
+        nonlocal payload, followups, size, blocks
         if payload:
             requests.append(AppendRequest(payload=payload, followups=followups))
             payload = []
             followups = []
             size = 0
+            blocks = 0
 
     for node in nodes:
-        # Inline the whole sub-tree when it is shallow enough and fits the
-        # size budget; otherwise append the node alone and defer its children
-        # (deferral can only attach to a top-level block, which this node is).
-        if _height(node) <= max_inline_depth and _estimate_block_size(node) <= max_bytes:
+        # Decide how this node enters the request:
+        #  - inline the whole sub-tree when it fits every limit; else
+        #  - a table too big for one request keeps its first rows and defers
+        #    the rest to its own ID (it must stay top-level); else
+        #  - append the node alone and defer its children (deferral can only
+        #    attach to a top-level block, which this node now is).
+        if _can_inline(node, max_inline_depth, max_blocks, max_bytes):
             inlined = node
-            deferred: list[dict[str, Any]] = []
+            child_requests: list[AppendRequest] = []
+        elif node.get("type") == "table":
+            inlined, child_requests = _split_table(node, max_blocks, max_bytes)
         else:
             inlined = _without_children(node)
-            deferred = _children_of(node)
+            child_requests = _plan_append(
+                _children_of(node), max_inline_depth, max_blocks, max_bytes
+            )
 
         node_size = _estimate_block_size(inlined)
+        node_blocks = _total_blocks(inlined)
         if payload and (
-            len(payload) >= max_blocks or size + node_size > max_bytes
+            blocks + node_blocks > max_blocks or size + node_size > max_bytes
         ):
             flush()
 
         index = len(payload)
         payload.append(inlined)
         size += node_size
+        blocks += node_blocks
 
-        if deferred:
-            child_requests = _plan_append(
-                deferred, max_inline_depth, max_blocks, max_bytes
-            )
+        if child_requests:
             followups.append(Followup(parent_index=index, requests=child_requests))
 
     flush()

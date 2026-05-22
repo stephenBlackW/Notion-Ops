@@ -7,6 +7,7 @@ import logging
 import re
 from typing import Any
 
+from notion_ops.exceptions import OversizedContentError
 from notion_ops.models.block import Block, Blocks, BlockType
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,33 @@ def _find_split_point(text: str, max_len: int) -> int:
 
     # Hard fallback – split at the exact limit
     return max_len
+
+
+def _check_text_splittable(text: str) -> None:
+    """Escalate when *text* has a whitespace-free run too long to split.
+
+    Normal prose splits cleanly at newlines or spaces. A single run longer
+    than the safe block limit has no natural break point, so placing it in a
+    Notion block would cut mid-token — a red flag for malformed input (pasted
+    blobs, minified payloads). Raise rather than silently fragment it.
+    """
+    longest = 0
+    run = 0
+    for ch in text:
+        if ch.isspace():
+            run = 0
+        else:
+            run += 1
+            if run > longest:
+                longest = run
+    if longest > _SAFE_CHAR_LIMIT:
+        preview = max(re.split(r'\s+', text), key=len)[:80]
+        logger.error(
+            "Oversized unsplittable text run (%d chars) in markdown content; "
+            "escalating instead of hard-splitting.",
+            longest,
+        )
+        raise OversizedContentError(longest, _SAFE_CHAR_LIMIT, preview)
 
 
 def _estimate_block_size(block: dict[str, Any]) -> int:
@@ -414,6 +442,9 @@ def markdown_to_blocks(markdown: str) -> list[dict[str, Any]]:
         if current_text:
             text = '\n'.join(current_text).strip()
             if text:
+                # Red flag: a text run with no newline/space can't be split at a
+                # natural boundary — escalate instead of cutting mid-token.
+                _check_text_splittable(text)
                 # Parse inline formatting first, then split at the Notion
                 # ~2000-char block limit between spans (never mid-span).
                 rich_text = _parse_inline_formatting(text)

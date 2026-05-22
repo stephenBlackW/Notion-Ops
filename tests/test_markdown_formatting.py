@@ -7,6 +7,9 @@ become italics, stray asterisks must stay literal, bold must survive the
 
 from __future__ import annotations
 
+import pytest
+
+from notion_ops.exceptions import OversizedContentError
 from notion_ops.utils.markdown import (
     _SAFE_CHAR_LIMIT,
     _normalize_language,
@@ -314,3 +317,38 @@ class TestCodeLanguage:
         blocks = markdown_to_blocks("```csv\na,b,c\n1,2,3\n```")
         assert blocks[0]["type"] == "code"
         assert blocks[0]["code"]["language"] == "plain text"
+
+
+# ---------------------------------------------------------------------------
+# Oversized / unsplittable text escalation
+# ---------------------------------------------------------------------------
+
+class TestOversizedText:
+    def test_spaced_long_paragraph_splits_without_escalating(self):
+        # Long but full of spaces -> splits cleanly at word boundaries.
+        blocks = markdown_to_blocks("word " * 600)
+        assert len(blocks) >= 2
+        assert all(b["type"] == "paragraph" for b in blocks)
+
+    def test_unsplittable_blob_escalates(self):
+        with pytest.raises(OversizedContentError) as exc:
+            markdown_to_blocks("x" * 2500)
+        assert exc.value.run_length == 2500
+        assert exc.value.limit == _SAFE_CHAR_LIMIT
+
+    def test_long_token_inside_paragraph_escalates(self):
+        text = "see this " + ("a" * 2100) + " token"
+        with pytest.raises(OversizedContentError):
+            markdown_to_blocks(text)
+
+    def test_run_at_limit_does_not_escalate(self):
+        # Exactly the safe limit is fine; only longer runs escalate.
+        blocks = markdown_to_blocks("a" * _SAFE_CHAR_LIMIT)
+        assert blocks[0]["type"] == "paragraph"
+
+    def test_long_code_line_does_not_escalate(self):
+        # Code blocks legitimately contain long lines (minified payloads);
+        # escalation applies to prose paragraphs only.
+        md = "```js\n" + ("a=" * 1500) + "\n```"
+        blocks = markdown_to_blocks(md)
+        assert blocks[0]["type"] == "code"
