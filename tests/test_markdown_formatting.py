@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from notion_ops.utils.markdown import (
     _SAFE_CHAR_LIMIT,
+    _normalize_language,
     _parse_inline_formatting,
     markdown_to_blocks,
 )
@@ -186,3 +187,130 @@ class TestDeepHeadings:
     def test_h5_demoted_to_h3(self):
         blocks = markdown_to_blocks("##### Deeper")
         assert blocks[0]["type"] == "heading_3"
+
+
+# ---------------------------------------------------------------------------
+# To-do items
+# ---------------------------------------------------------------------------
+
+class TestTodoItems:
+    def test_unchecked_and_checked(self):
+        blocks = markdown_to_blocks("- [ ] open\n- [x] done\n- [X] also done")
+        assert [b["type"] for b in blocks] == ["to_do", "to_do", "to_do"]
+        assert [b["to_do"]["checked"] for b in blocks] == [False, True, True]
+
+    def test_plain_bullet_is_not_todo(self):
+        blocks = markdown_to_blocks("- normal bullet")
+        assert blocks[0]["type"] == "bulleted_list_item"
+
+    def test_todo_keeps_inline_formatting(self):
+        blocks = markdown_to_blocks("- [ ] validate **gas_turbine** prior")
+        rt = blocks[0]["to_do"]["rich_text"]
+        bold = [s["text"]["content"] for s in rt if s.get("annotations", {}).get("bold")]
+        assert bold == ["gas_turbine"]
+
+
+# ---------------------------------------------------------------------------
+# Images
+# ---------------------------------------------------------------------------
+
+class TestImages:
+    def test_external_image_block(self):
+        blocks = markdown_to_blocks("![a chart](https://example.com/c.png)")
+        assert len(blocks) == 1
+        img = blocks[0]
+        assert img["type"] == "image"
+        assert img["image"]["type"] == "external"
+        assert img["image"]["external"]["url"] == "https://example.com/c.png"
+        assert img["image"]["caption"][0]["text"]["content"] == "a chart"
+
+    def test_image_without_alt_has_no_caption(self):
+        blocks = markdown_to_blocks("![](https://example.com/c.png)")
+        assert blocks[0]["type"] == "image"
+        assert "caption" not in blocks[0]["image"]
+
+    def test_local_image_falls_through_to_text(self):
+        # Cannot embed local files by reference; keep visible rather than drop.
+        blocks = markdown_to_blocks("![local](./figure.png)")
+        assert blocks[0]["type"] == "paragraph"
+        assert "figure.png" in blocks[0]["paragraph"]["rich_text"][0]["text"]["content"]
+
+
+# ---------------------------------------------------------------------------
+# Collapsible <details> -> toggle
+# ---------------------------------------------------------------------------
+
+class TestDetailsToggle:
+    def test_summary_becomes_label_and_body_becomes_children(self):
+        md = (
+            "<details>\n"
+            "<summary>Config lens</summary>\n\n"
+            "Some body text.\n\n"
+            "| Fact | Value |\n"
+            "|------|-------|\n"
+            "| capex_per_kw | 1100 |\n\n"
+            "</details>"
+        )
+        blocks = markdown_to_blocks(md)
+        assert len(blocks) == 1
+        toggle = blocks[0]
+        assert toggle["type"] == "toggle"
+        assert toggle["toggle"]["rich_text"][0]["text"]["content"] == "Config lens"
+        child_types = [c["type"] for c in toggle["toggle"]["children"]]
+        assert child_types == ["paragraph", "table"]
+
+    def test_summary_parses_inline_markup(self):
+        md = "<details>\n<summary>**Bold** label</summary>\n\nbody\n\n</details>"
+        rt = markdown_to_blocks(md)[0]["toggle"]["rich_text"]
+        assert rt[0]["text"]["content"] == "Bold"
+        assert rt[0]["annotations"]["bold"] is True
+
+    def test_missing_summary_uses_default_label(self):
+        md = "<details>\n\njust body\n\n</details>"
+        toggle = markdown_to_blocks(md)[0]
+        assert toggle["toggle"]["rich_text"][0]["text"]["content"] == "Details"
+
+    def test_nested_details_nests_toggles(self):
+        md = (
+            "<details>\n<summary>Outer</summary>\n\n"
+            "<details>\n<summary>Inner</summary>\n\nleaf\n\n</details>\n\n"
+            "</details>"
+        )
+        outer = markdown_to_blocks(md)[0]
+        assert outer["toggle"]["rich_text"][0]["text"]["content"] == "Outer"
+        inner = outer["toggle"]["children"][0]
+        assert inner["type"] == "toggle"
+        assert inner["toggle"]["rich_text"][0]["text"]["content"] == "Inner"
+        assert inner["toggle"]["children"][0]["type"] == "paragraph"
+
+    def test_unterminated_details_degrades_to_text(self):
+        blocks = markdown_to_blocks("<details>\n<summary>x</summary>\nno close")
+        assert all(b["type"] != "toggle" for b in blocks)
+
+
+# ---------------------------------------------------------------------------
+# Code-fence language normalization
+# ---------------------------------------------------------------------------
+
+class TestCodeLanguage:
+    def test_unsupported_language_falls_back(self):
+        assert _normalize_language("csv") == "plain text"
+        assert _normalize_language("tsv") == "plain text"
+        assert _normalize_language("ini") == "plain text"
+
+    def test_aliases_map_to_enum(self):
+        assert _normalize_language("py") == "python"
+        assert _normalize_language("ts") == "typescript"
+        assert _normalize_language("sh") == "bash"
+
+    def test_supported_language_preserved(self):
+        for lang in ("python", "yaml", "toml", "mermaid", "rust"):
+            assert _normalize_language(lang) == lang
+
+    def test_empty_is_plain_text(self):
+        assert _normalize_language("") == "plain text"
+
+    def test_csv_fence_block_uses_plain_text(self):
+        blocks = markdown_to_blocks("```csv\na,b,c\n1,2,3\n```")
+        assert blocks[0]["type"] == "code"
+        assert blocks[0]["code"]["language"] == "plain text"
