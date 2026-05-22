@@ -10,12 +10,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from notion_ops.utils.markdown import (
-    _MAX_BLOCKS_PER_REQUEST,
-    _MAX_PAYLOAD_BYTES,
-    _estimate_block_size,
-    markdown_to_blocks,
-)
+from notion_ops.utils.markdown import markdown_to_blocks
+from notion_ops.utils.publish import publish_block_tree
 
 logger = logging.getLogger(__name__)
 
@@ -139,39 +135,15 @@ def create_atom_page(
         'content_error': None,
     }
 
-    # Attempt to append content blocks — failure is non-fatal
+    # Attempt to append content blocks — failure is non-fatal.
+    # publish_block_tree() converts markdown to a nested block tree and appends
+    # it in the minimum number of requests that respects Notion's per-request
+    # nesting (2 levels), block-count (100), and payload-size limits — deferring
+    # deeper sub-trees (e.g. nested toggles) into follow-up appends.
     if content_markdown:
         try:
-            # Convert markdown to blocks (returns dicts in API format)
             blocks = markdown_to_blocks(content_markdown)
-
-            # Size-aware batching: respect both the block-count limit and
-            # a conservative payload-size limit to avoid API rejections.
-            current_batch: list[dict[str, Any]] = []
-            current_size = 0
-
-            for block in blocks:
-                block_size = _estimate_block_size(block)
-
-                if current_batch and (
-                    len(current_batch) >= _MAX_BLOCKS_PER_REQUEST
-                    or current_size + block_size > _MAX_PAYLOAD_BYTES
-                ):
-                    notion_client.api.blocks.children.append(
-                        block_id=page.id,
-                        children=current_batch,
-                    )
-                    current_batch = []
-                    current_size = 0
-
-                current_batch.append(block)
-                current_size += block_size
-
-            if current_batch:
-                notion_client.api.blocks.children.append(
-                    block_id=page.id,
-                    children=current_batch,
-                )
+            publish_block_tree(notion_client, page.id, blocks)
         except Exception as e:
             result['content_error'] = str(e)
             logger.warning(
