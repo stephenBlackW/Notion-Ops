@@ -470,8 +470,32 @@ def markdown_to_blocks(markdown: str) -> list[dict[str, Any]]:
     return [b.to_api_format() if isinstance(b, Block) else b for b in blocks]
 
 
+# Notion code-block `language` is a fixed enum; values outside it are rejected
+# with a 400 (ISS-008). Anything not in this set (after alias mapping) falls back
+# to "plain text". Source: Notion API code-block language enum.
+_NOTION_CODE_LANGUAGES = frozenset({
+    "abap", "agda", "arduino", "assembly", "bash", "basic", "bnf", "c", "c#",
+    "c++", "clojure", "coffeescript", "coq", "css", "dart", "dhall", "diff",
+    "docker", "ebnf", "elixir", "elm", "erlang", "f#", "flow", "fortran",
+    "gherkin", "glsl", "go", "graphql", "groovy", "haskell", "hcl", "html",
+    "idris", "java", "javascript", "json", "julia", "kotlin", "latex", "less",
+    "lisp", "livescript", "llvm ir", "lua", "makefile", "markdown", "markup",
+    "matlab", "mathematica", "mermaid", "nix", "notion formula", "objective-c",
+    "ocaml", "pascal", "perl", "php", "plain text", "powershell", "prolog",
+    "protobuf", "purescript", "python", "r", "racket", "reason", "ruby", "rust",
+    "sass", "scala", "scheme", "scss", "shell", "smalltalk", "solidity", "sql",
+    "swift", "toml", "typescript", "vb.net", "verilog", "vhdl", "visual basic",
+    "webassembly", "xml", "yaml", "java/c/c++/c#",
+})
+
+
 def _normalize_language(lang: str) -> str:
-    """Normalize language identifier for Notion code blocks."""
+    """Normalize language identifier for Notion code blocks.
+
+    Maps common aliases to Notion-supported languages, then falls back to
+    "plain text" for anything outside Notion's code-block language enum
+    (ISS-008: e.g. ``csv``/``tsv`` are not enum members and 400 otherwise).
+    """
     lang = lang.lower().strip()
 
     # Map common aliases to Notion-supported languages
@@ -513,6 +537,7 @@ def _normalize_language(lang: str) -> str:
         'tex': 'latex',
     }
 
-    return lang_map.get(lang, lang if lang else "plain text")
+    mapped = lang_map.get(lang, lang)
+    return mapped if mapped in _NOTION_CODE_LANGUAGES else "plain text"
 
 
