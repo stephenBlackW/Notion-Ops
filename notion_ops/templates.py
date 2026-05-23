@@ -7,8 +7,8 @@ instantiate it via the API as many times as you like, overriding properties and
 substituting variables per call.
 
 The engine is intentionally **generic and DB-agnostic** — it imports no config
-and hardcodes no database ids. See ``cli/atoms.py`` (``create_atom_page``) for
-the reference example of an application-specific template built on this engine.
+and hardcodes no database ids. See ``cli/atoms.py`` for the reference example of
+an application-specific template built on this engine.
 """
 
 from __future__ import annotations
