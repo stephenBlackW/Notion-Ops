@@ -399,6 +399,21 @@ def markdown_to_blocks(markdown: str) -> list[dict[str, Any]]:
             idx += 1
             continue
 
+        # Heading 4-6: Notion supports only h1-h3, so map h4+ to heading_3
+        # rather than letting the line fall through to a literal-text
+        # paragraph (ISS-005).
+        h456 = re.match(r'^#{4,6}\s+(.*)$', line)
+        if h456:
+            flush_text()
+            heading_text = h456.group(1).strip()
+            rich_text = _parse_inline_formatting(heading_text)
+            blocks.append(Block(
+                type=BlockType.HEADING_3,
+                content={"rich_text": rich_text, "is_toggleable": False}
+            ))
+            idx += 1
+            continue
+
         # Divider
         if line.strip() in ('---', '***', '___'):
             flush_text()
