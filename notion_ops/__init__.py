@@ -38,6 +38,8 @@ from notion_ops.models.properties import (
     URLProperty,
 )
 from notion_ops.utils.atoms import create_atom_page
+from notion_ops.utils.ids import extract_notion_id
+from notion_ops.utils.markdown import markdown_to_blocks
 
 __version__ = "0.1.0"
 
@@ -84,4 +86,6 @@ __all__ = [
     "ConflictError",
     # Utilities
     "create_atom_page",
+    "markdown_to_blocks",
+    "extract_notion_id",
 ]
