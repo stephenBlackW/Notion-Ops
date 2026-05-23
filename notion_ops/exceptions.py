@@ -65,6 +65,29 @@ class PermissionError(NotionOpsError):
         super().__init__(message, code="restricted_resource")
 
 
+class OversizedContentError(NotionOpsError):
+    """Raised when markdown contains a text run too large to split safely.
+
+    Notion caps a single rich_text/text block at ~2000 characters. Normal
+    prose splits cleanly at newlines or spaces, but an unbroken run with no
+    whitespace (e.g. a pasted base64 blob or minified payload in a paragraph)
+    cannot be split without cutting mid-token. That is a red flag for malformed
+    input, so it is escalated rather than silently chopped into fragments.
+    """
+
+    def __init__(self, run_length: int, limit: int, preview: str):
+        message = (
+            f"Unsplittable text run of {run_length} chars exceeds the "
+            f"{limit}-char block limit (no newline or space to break on). "
+            f"This usually means malformed input. Preview: {preview!r}"
+        )
+        super().__init__(message, code="oversized_content")
+        self.run_length = run_length
+        self.limit = limit
+        self.preview = preview
+
+
+
 def map_api_error(
     error: APIResponseError,
     resource_type: str = "resource",
