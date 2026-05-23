@@ -15,7 +15,7 @@ from notion_ops.utils.markdown import (
     _find_split_point,
     markdown_to_blocks,
 )
-from notion_ops.utils.atoms import create_atom_page
+from cli.atoms import create_atom_page
 
 # ---------------------------------------------------------------------------
 # _find_split_point
