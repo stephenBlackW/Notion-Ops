@@ -1,6 +1,6 @@
 """Tests for inline emphasis and table rendering in markdown_to_blocks.
 
-Covers the ISS-005 / ISS-010 fixes: underscores inside identifiers must not
+Covers the ISS-005 / ISS-013 fixes: underscores inside identifiers must not
 become italics, stray asterisks must stay literal, bold must survive the
 2000-char split boundary, and table cells/headers must parse inline markup.
 """

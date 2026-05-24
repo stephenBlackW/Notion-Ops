@@ -64,7 +64,7 @@ class FileUploads:
     Use via ``client.file_uploads`` on a :class:`NotionOps` instance.
     """
 
-    def __init__(self, client: "NotionOps"):
+    def __init__(self, client: NotionOps):
         self._client = client
 
     # ------------------------------------------------------------------

@@ -46,6 +46,11 @@ class Database(BaseModel):
     archived: bool = False
     is_inline: bool = False
     url: str = ""
+    # Schema properties when the API response includes them (raw
+    # databases.retrieve does; the new-API database object may not). Defaults
+    # empty rather than forcing callers to client._notion.databases.retrieve
+    # for schema access (ISS-003).
+    properties: dict[str, PropertyDefinition] = Field(default_factory=dict)
 
     @classmethod
     def from_api_response(cls, data: dict[str, Any]) -> "Database":
@@ -64,6 +69,11 @@ class Database(BaseModel):
             # In older API, database ID is also the data source ID
             data_sources = [data["id"]]
 
+        # Parse schema properties when present (reuse the data-source parser).
+        properties = DataSourceSchema.from_api_response(
+            data.get("properties", {})
+        ).properties
+
         return cls(
             id=data["id"],
             title=title,
@@ -77,7 +87,17 @@ class Database(BaseModel):
             archived=data.get("archived", False),
             is_inline=data.get("is_inline", False),
             url=data.get("url", ""),
+            properties=properties,
         )
+
+    def get_property_names(self) -> list[str]:
+        """Get all schema property names (empty if the response had no schema)."""
+        return list(self.properties.keys())
+
+    def get_property_type(self, name: str) -> PropertyType | None:
+        """Get the type of a property by name, or None if absent."""
+        prop = self.properties.get(name)
+        return prop.type if prop else None
 
 
 class DataSource(BaseModel):
