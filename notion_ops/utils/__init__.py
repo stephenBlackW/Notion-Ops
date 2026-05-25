@@ -2,6 +2,7 @@
 
 from notion_ops.utils.ids import extract_notion_id
 from notion_ops.utils.markdown import markdown_to_blocks
+from notion_ops.utils.repair import blocks_to_markdown, repair_blocks
 from notion_ops.utils.rich_text import (
     extract_plain_text,
     make_rich_text,
@@ -14,4 +15,6 @@ __all__ = [
     "parse_rich_text",
     "extract_plain_text",
     "markdown_to_blocks",
+    "blocks_to_markdown",
+    "repair_blocks",
 ]
