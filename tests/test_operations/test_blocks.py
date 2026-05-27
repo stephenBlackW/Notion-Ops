@@ -6,7 +6,7 @@ Both code paths are exercised via the parametrised ``ops`` fixture.
 import pytest
 from notion_client.errors import APIErrorCode
 
-from notion_ops.exceptions import NotFoundError, NotionOpsError
+from notion_ops.exceptions import NotFoundError
 from notion_ops.models.block import Block, Blocks, BlockType
 from notion_ops.operations.blocks import ChildPageInfo
 

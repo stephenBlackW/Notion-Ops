@@ -9,7 +9,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
-from httpx import HTTPStatusError, Request, Response
+from httpx import Request, Response
 
 from notion_ops.client import NotionOps
 from notion_ops.exceptions import NotionOpsError

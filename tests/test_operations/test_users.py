@@ -6,7 +6,7 @@ Both code paths are exercised via the parametrised ``ops`` fixture.
 import pytest
 from notion_client.errors import APIErrorCode
 
-from notion_ops.exceptions import AuthenticationError, NotFoundError, NotionOpsError
+from notion_ops.exceptions import AuthenticationError, NotFoundError
 from notion_ops.operations.users import User
 
 from .conftest import maybe_await

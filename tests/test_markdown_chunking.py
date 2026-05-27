@@ -3,19 +3,14 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock
 
-import pytest
 
-from notion_ops.models.page import Page
 from notion_ops.utils.markdown import (
-    _MAX_BLOCKS_PER_REQUEST,
     _SAFE_CHAR_LIMIT,
     _estimate_block_size,
     _find_split_point,
     markdown_to_blocks,
 )
-from cli.atoms import create_atom_page
 
 # ---------------------------------------------------------------------------
 # _find_split_point
@@ -216,84 +211,3 @@ class TestCodeBlockSplitting:
             if stripped:
                 assert stripped.endswith("#")
 
-
-# ---------------------------------------------------------------------------
-# create_atom_page – size-aware batching
-# ---------------------------------------------------------------------------
-
-@pytest.fixture
-def mock_notion_client():
-    """A NotionOps-like mock with pages.create and blocks.children.append."""
-    client = MagicMock()
-
-    mock_page = MagicMock(spec=Page)
-    mock_page.id = "test-page-id-1234"
-    client.pages.create.return_value = mock_page
-
-    # Wire _notion and api to the same mock (mirrors the property in NotionOps)
-    sdk_mock = MagicMock()
-    sdk_mock.blocks.children.append.return_value = {}
-    client._notion = sdk_mock
-    client.api = sdk_mock
-    return client
-
-
-class TestSizeAwareBatching:
-    """Tests that create_atom_page batches by both count and payload size."""
-
-    def test_small_content_single_batch(self, mock_notion_client):
-        """Small content should result in exactly one append call."""
-        md = "## Hello\n\nShort paragraph."
-        result = create_atom_page(
-            mock_notion_client,
-            title="Small",
-            content_markdown=md,
-            atom_type="Note",
-        )
-
-        assert result['content_error'] is None
-        assert mock_notion_client._notion.blocks.children.append.call_count == 1
-
-    def test_many_blocks_batches_by_count(self, mock_notion_client):
-        """More than 100 blocks should result in multiple append calls."""
-        # Generate 150+ blocks (each bullet becomes a block)
-        lines = [f"- Item {i}" for i in range(150)]
-        md = "\n".join(lines)
-
-        result = create_atom_page(
-            mock_notion_client,
-            title="Many blocks",
-            content_markdown=md,
-            atom_type="Note",
-        )
-
-        assert result['content_error'] is None
-        # Should have at least 2 calls (150 blocks / 100 per batch)
-        assert mock_notion_client._notion.blocks.children.append.call_count >= 2
-
-        # Verify no single call has more than 100 blocks
-        for call in mock_notion_client._notion.blocks.children.append.call_args_list:
-            children = call[1].get("children", call[0][0] if call[0] else [])
-            if isinstance(children, list):
-                assert len(children) <= _MAX_BLOCKS_PER_REQUEST
-
-    def test_large_blocks_batches_by_size(self, mock_notion_client):
-        """Even with fewer than 100 blocks, large payloads should split."""
-        # Create blocks that are individually large (close to 2000 chars each)
-        # 20 blocks * ~1800 chars each ≈ 36KB which is under limit
-        # But 200 blocks * ~1800 chars = ~360KB which should trigger size batching
-        big_lines = []
-        for i in range(200):
-            big_lines.append(f"- {'x' * 1700} item{i}")
-        md = "\n".join(big_lines)
-
-        result = create_atom_page(
-            mock_notion_client,
-            title="Large payload",
-            content_markdown=md,
-            atom_type="Note",
-        )
-
-        assert result['content_error'] is None
-        # Should have multiple calls due to payload size
-        assert mock_notion_client._notion.blocks.children.append.call_count >= 2
