@@ -118,14 +118,18 @@ def _auth_headers(client: Any, *, json_content: bool = False) -> dict[str, str]:
     owns the operation.
     """
     token = getattr(client, "_auth", None) or ""
-    # Notion-Version: prefer the version configured on the underlying SDK.
-    notion_version = (
+    # Notion-Version: prefer the version configured on the underlying SDK, then
+    # the client's own setting, then the library default. Always a concrete str.
+    sdk_version = (
         getattr(client.api, "options", {}).get("notion_version")
         if hasattr(client.api, "options")
         else None
     )
-    if not notion_version:
-        notion_version = getattr(client, "_notion_version", _DEFAULT_NOTION_VERSION)
+    notion_version: str = (
+        sdk_version
+        or getattr(client, "_notion_version", None)
+        or _DEFAULT_NOTION_VERSION
+    )
     headers: dict[str, str] = {
         "Authorization": f"Bearer {token}",
         "Notion-Version": notion_version,
