@@ -1,9 +1,9 @@
-# DRAFT standalone pyproject for the future public `notion-ops` repo (PUB-03).
-# This is NOT the monorepo build config — it is staged here for the carve-out
-# (it becomes the public repo's root pyproject.toml). The monorepo root
-# pyproject.toml (name="agentic-os") still governs the AOS build.
+# Build config for the public `notion-ops` PyPI package (carved out of
+# AgenticOS in Session 1, 2026-05-27 — STATE.md D-26). This file is the
+# root pyproject of the standalone repo `stephenBlackW/Notion-Ops`.
 #
-# Validated by tests/test_iss_refactor_b.py::test_standalone_pyproject_draft_valid.
+# Version is single-sourced from notion_ops/__init__.py::__version__ via the
+# hatchling dynamic-version hook below (nops-housekeeping-A, 2026-05-31).
 
 [build-system]
 requires = ["hatchling"]
@@ -11,12 +11,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "notion-ops"
-version = "0.1.0"
+dynamic = ["version"]
 description = "A high-level, typed, retry-aware Python client for Notion workspaces."
-readme = "README.md"
+readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.10"
 license = "MIT"
-authors = [{ name = "Stephen Black" }]
+authors = [{ name = "Stephen Black", email = "stphnblck1@gmail.com" }]
 keywords = ["notion", "notion-api", "client", "pydantic"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -30,7 +30,11 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "notion-client>=2.3.0",
+    # Floor is the data-sources-aware line: notion-ops defaults Notion-Version
+    # 2025-09-03 (databases->data_sources model) and uses the SDK's
+    # `data_sources` namespace. The former >=2.3.0 floor predated that support.
+    # The runtime contract is enforced by tests/test_api_currency.py.
+    "notion-client>=2.4.0",
     "pydantic>=2.0",
     "httpx>=0.25.0",
 ]
@@ -47,6 +51,10 @@ dev = [
 Homepage = "https://github.com/stephenblackw/notion-ops"
 Repository = "https://github.com/stephenblackw/notion-ops"
 Issues = "https://github.com/stephenblackw/notion-ops/issues"
+
+[tool.hatch.version]
+# Single source of truth: notion_ops/__init__.py::__version__
+path = "notion_ops/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["notion_ops"]
