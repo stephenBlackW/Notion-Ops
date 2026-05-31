@@ -40,6 +40,11 @@ from notion_ops.models.properties import (
 from notion_ops.templates import PageTemplate
 from notion_ops.utils.ids import extract_notion_id
 from notion_ops.utils.markdown import markdown_to_blocks
+from notion_ops.utils.publish import (
+    PublishResult,
+    publish_block_tree,
+    publish_markdown,
+)
 from notion_ops.utils.repair import blocks_to_markdown, repair_blocks
 
 __version__ = "0.1.0"
@@ -92,4 +97,8 @@ __all__ = [
     "blocks_to_markdown",
     "repair_blocks",
     "extract_notion_id",
+    # Publishing (the limit-aware publisher — the headline API)
+    "publish_block_tree",
+    "publish_markdown",
+    "PublishResult",
 ]

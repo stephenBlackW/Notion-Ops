@@ -17,12 +17,8 @@ import logging
 from typing import Any
 
 from notion_ops.models.properties import TitleProperty
-from notion_ops.utils.markdown import (
-    _MAX_BLOCKS_PER_REQUEST,
-    _MAX_PAYLOAD_BYTES,
-    _estimate_block_size,
-    markdown_to_blocks,
-)
+from notion_ops.utils.markdown import markdown_to_blocks
+from notion_ops.utils.publish import publish_block_tree
 
 logger = logging.getLogger(__name__)
 
@@ -77,8 +73,9 @@ class PageTemplate:
         """Create one page from this template.
 
         Merges ``static_properties`` with the per-call ``properties`` (per-call
-        wins), sets the title property, creates the page, then renders and
-        appends the body in size-aware batches.
+        wins), sets the title property, creates the page, then renders the body
+        and publishes it via the limit-aware :func:`~notion_ops.publish_block_tree`
+        (honouring Notion's nesting / 100-children / table-row caps).
 
         The page is created first and the result dict is built immediately, so
         callers always receive the ``page_id`` even when the subsequent body
@@ -130,34 +127,14 @@ class PageTemplate:
         if body:
             try:
                 blocks = markdown_to_blocks(body)
-
-                # Size-aware batching: respect both the block-count limit and a
-                # conservative payload-size limit to avoid API rejections.
-                current_batch: list[dict[str, Any]] = []
-                current_size = 0
-
-                for block in blocks:
-                    block_size = _estimate_block_size(block)
-
-                    if current_batch and (
-                        len(current_batch) >= _MAX_BLOCKS_PER_REQUEST
-                        or current_size + block_size > _MAX_PAYLOAD_BYTES
-                    ):
-                        client.api.blocks.children.append(
-                            block_id=page.id,
-                            children=current_batch,
-                        )
-                        current_batch = []
-                        current_size = 0
-
-                    current_batch.append(block)
-                    current_size += block_size
-
-                if current_batch:
-                    client.api.blocks.children.append(
-                        block_id=page.id,
-                        children=current_batch,
-                    )
+                # Route through the limit-aware publisher (ISS-017). The flat
+                # batcher this replaced respected only the block-count and
+                # payload-size caps; it ignored Notion's 2-level inline-nesting
+                # limit and >100-row table splitting, so deeply nested or
+                # large-table bodies produced single requests Notion rejects.
+                # publish_block_tree plans the minimum sequence of appends that
+                # honours every limit and defers deeper sub-trees correctly.
+                publish_block_tree(client, page.id, blocks)
             except Exception as e:
                 result["content_error"] = str(e)
                 logger.warning(

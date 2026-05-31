@@ -6,7 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- Promoted the limit-aware publisher to top-level exports: `publish_block_tree`,
+  `publish_markdown`, and `PublishResult` are now importable from `notion_ops`
+  (and listed in `__all__`).
+
 ### Changed
+- `PageTemplate` now publishes its body through `publish_block_tree` instead of
+  an ad-hoc flat batcher (ISS-017), so templated bodies respect Notion's
+  2-level inline-nesting limit and >100-row table splitting. Minor observable
+  note: the body is appended under the page's *normalized* (dashless) id.
 - Version is now single-sourced from `notion_ops/__init__.py::__version__`
   (hatchling dynamic version); `pyproject.toml` no longer duplicates it.
 - Raised the `notion-client` dependency floor to `>=2.4.0` — the data-sources
