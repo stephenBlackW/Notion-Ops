@@ -7,6 +7,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Idempotent republish (ISS-012):** `republish_block_tree` / `republish_markdown`
+  (+ `RepublishResult`) clear a page's existing top-level children, then publish the
+  new tree — so re-running converges to the same content instead of duplicating it
+  (Notion has no native "replace children"). Content is idempotent; block ids are not
+  stable (cleared blocks are archived + recreated). Promoted to top-level exports.
+- **Partial-publish observability (HL-patchA-1):** `PublishResult` gains `partial`
+  and `skipped_followups`, set when a deferred nested append can't resolve its parent
+  id — callers can branch on `partial` instead of scraping logs.
 - `AsyncFileUploads` — async parity for the file-upload flow (`httpx.AsyncClient`
   + `retry_on_transient_async`). `AsyncNotionOps.file_uploads` now exposes it, so
   `await client.file_uploads.upload_file(...)` no longer blocks the event loop on
