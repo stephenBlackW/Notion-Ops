@@ -23,14 +23,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `publish_markdown`, and `PublishResult` are now importable from `notion_ops`
   (and listed in `__all__`).
 
+- `CHANGELOG.md` (this file).
+- Packaging metadata: author email and an explicit README content type.
+
 ### Changed
 - `FileUploads.create`/`send` now raise the same typed `NotionOpsError`
   subclasses as every SDK-backed operation (`NotFoundError`, `AuthenticationError`,
   `PermissionError`, `RateLimitError`, `ValidationError`, `ConflictError`) instead
   of a bare `NotionOpsError` carrying the status string (audit F3). A 429 maps to
   `RateLimitError` and is retried with backoff like the rest of the library.
-
-### Changed
 - `PageTemplate` now publishes its body through `publish_block_tree` instead of
   an ad-hoc flat batcher (ISS-017), so templated bodies respect Notion's
   2-level inline-nesting limit and >100-row table splitting. Minor observable
@@ -41,10 +42,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   line. notion-ops defaults `Notion-Version` to `2025-09-03` and uses the
   SDK's `data_sources` namespace; the prior `>=2.3.0` floor predated it. The
   contract is now enforced by `tests/test_api_currency.py`.
-
-### Added
-- `CHANGELOG.md` (this file).
-- Packaging metadata: author email and an explicit README content type.
 
 ## [0.1.0] — 2026-05-27
 

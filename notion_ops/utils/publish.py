@@ -467,6 +467,13 @@ def republish_block_tree(
     diffed in place. A minimal-write content diff is a future optimization
     (HL-cycle1-1); this is the robust, limit-aware keep-in-sync primitive.
 
+    **Not atomic:** the clear and the republish are separate request batches. If
+    the process is interrupted (or a non-transient error such as a 4xx on a
+    delete aborts the clear), the page can be left empty or partially cleared —
+    a re-run converges it again, but there is no transactional rollback. Notion
+    exposes no multi-block transaction, so callers needing all-or-nothing must
+    wrap this themselves.
+
     ``**kwargs`` are forwarded to :func:`publish_block_tree` (the limit knobs).
     """
     parent = extract_notion_id(parent_id)
