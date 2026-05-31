@@ -23,11 +23,19 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from notion_ops.exceptions import NotionOpsError
-from notion_ops.utils.retry import retry_on_transient
+from notion_ops.exceptions import (
+    AuthenticationError,
+    ConflictError,
+    NotFoundError,
+    NotionOpsError,
+    PermissionError,
+    RateLimitError,
+    ValidationError,
+)
+from notion_ops.utils.retry import retry_on_transient, retry_on_transient_async
 
 if TYPE_CHECKING:
-    from notion_ops.client import NotionOps
+    from notion_ops.client import AsyncNotionOps, NotionOps
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +66,103 @@ def _infer_content_type(path: Path) -> str:
     return guessed or "application/octet-stream"
 
 
+def _map_http_error(
+    response: httpx.Response,
+    *,
+    operation: str,
+    resource_id: str = "",
+) -> NotionOpsError:
+    """Map a non-2xx ``httpx.Response`` to a typed ``NotionOpsError`` subclass.
+
+    file_uploads talks to Notion's REST endpoint directly via ``httpx`` rather
+    than the notion-client SDK, so it never sees an ``APIResponseError`` and
+    cannot use :func:`notion_ops.exceptions.map_api_error`. This is the httpx
+    analog: it selects the same subclasses by HTTP status so file_uploads
+    raises the same typed errors as every SDK-backed operation (audit F3).
+
+    429 maps to :class:`RateLimitError`, which ``retry_on_transient`` treats as
+    transient — so a rate-limited upload retries with backoff like the rest of
+    the library instead of failing on the first 429.
+    """
+    status = response.status_code
+    detail = response.text
+    if status == 404:
+        return NotFoundError("file upload", resource_id or "<unknown>")
+    if status == 401:
+        return AuthenticationError()
+    if status == 403:
+        return PermissionError()
+    if status == 429:
+        retry_after = 1.0
+        raw = response.headers.get("Retry-After")
+        if raw is not None:
+            try:
+                retry_after = float(raw)
+            except (ValueError, TypeError):
+                pass
+        return RateLimitError(retry_after=retry_after)
+    if status in (400, 422):
+        return ValidationError(f"{operation} request invalid ({status}): {detail}")
+    if status == 409:
+        return ConflictError(f"{operation} conflict: {detail}")
+    return NotionOpsError(
+        f"{operation} failed with status {status}: {detail}", code=str(status)
+    )
+
+
+def _auth_headers(client: Any, *, json_content: bool = False) -> dict[str, str]:
+    """Build Authorization + Notion-Version headers for direct HTTP calls.
+
+    Shared by the sync and async file-upload classes; reads the auth token and
+    Notion-Version off whichever client (``NotionOps`` or ``AsyncNotionOps``)
+    owns the operation.
+    """
+    token = getattr(client, "_auth", None) or ""
+    # Notion-Version: prefer the version configured on the underlying SDK.
+    notion_version = (
+        getattr(client.api, "options", {}).get("notion_version")
+        if hasattr(client.api, "options")
+        else None
+    )
+    if not notion_version:
+        notion_version = getattr(client, "_notion_version", _DEFAULT_NOTION_VERSION)
+    headers: dict[str, str] = {
+        "Authorization": f"Bearer {token}",
+        "Notion-Version": notion_version,
+    }
+    if json_content:
+        headers["Content-Type"] = "application/json"
+    return headers
+
+
+def _image_block_payload(
+    upload_id: str,
+    *,
+    caption: str | None = None,
+) -> dict[str, Any]:
+    """Build an ``image`` block payload backed by a ``file_upload`` reference.
+
+    Shared by the sync and async file-upload classes so both produce byte-for-
+    byte identical block payloads.
+    """
+    image_payload: dict[str, Any] = {
+        "type": "file_upload",
+        "file_upload": {"id": upload_id},
+    }
+    if caption:
+        image_payload["caption"] = [
+            {
+                "type": "text",
+                "text": {"content": caption},
+            }
+        ]
+    return {
+        "object": "block",
+        "type": "image",
+        "image": image_payload,
+    }
+
+
 class FileUploads:
     """Three-step Notion File Upload API operations.
 
@@ -73,24 +178,7 @@ class FileUploads:
 
     def _auth_headers(self, *, json_content: bool = False) -> dict[str, str]:
         """Build Authorization + Notion-Version headers for direct HTTP calls."""
-        token = getattr(self._client, "_auth", None) or ""
-        # Notion-Version: prefer the version configured on the underlying SDK.
-        notion_version = (
-            getattr(self._client.api, "options", {}).get("notion_version")
-            if hasattr(self._client.api, "options")
-            else None
-        )
-        if not notion_version:
-            notion_version = getattr(
-                self._client, "_notion_version", _DEFAULT_NOTION_VERSION
-            )
-        headers: dict[str, str] = {
-            "Authorization": f"Bearer {token}",
-            "Notion-Version": notion_version,
-        }
-        if json_content:
-            headers["Content-Type"] = "application/json"
-        return headers
+        return _auth_headers(self._client, json_content=json_content)
 
     # ------------------------------------------------------------------
     # Step 1 — create the upload object
@@ -147,10 +235,7 @@ class FileUploads:
             response.raise_for_status()
 
         if response.status_code >= 400:
-            raise NotionOpsError(
-                f"File upload create failed with status "
-                f"{response.status_code}: {response.text}"
-            )
+            raise _map_http_error(response, operation="File upload create")
 
         return response.json()
 
@@ -196,10 +281,7 @@ class FileUploads:
             response.raise_for_status()
 
         if response.status_code >= 400:
-            raise NotionOpsError(
-                f"File upload send failed with status "
-                f"{response.status_code}: {response.text}"
-            )
+            raise _map_http_error(response, operation="File upload send")
 
         # Notion returns JSON for the upload object; if the body is empty
         # for any reason, fall back to an empty dict so callers don't crash.
@@ -291,23 +373,7 @@ class FileUploads:
                     },
                 }
         """
-        image_payload: dict[str, Any] = {
-            "type": "file_upload",
-            "file_upload": {"id": upload_id},
-        }
-        if caption:
-            image_payload["caption"] = [
-                {
-                    "type": "text",
-                    "text": {"content": caption},
-                }
-            ]
-
-        return {
-            "object": "block",
-            "type": "image",
-            "image": image_payload,
-        }
+        return _image_block_payload(upload_id, caption=caption)
 
     def upload_and_attach(
         self,
@@ -331,4 +397,141 @@ class FileUploads:
             A block payload dict (see :meth:`image_block`).
         """
         upload_id = self.upload_file(path)
+        return self.image_block(upload_id, caption=caption)
+
+
+class AsyncFileUploads:
+    """Async counterpart of :class:`FileUploads` (audit F3 async parity).
+
+    Mirrors the sync API using ``httpx.AsyncClient`` + ``retry_on_transient_async``
+    so ``await client.file_uploads.upload_file(...)`` works on an
+    :class:`~notion_ops.client.AsyncNotionOps` instead of silently running a
+    blocking sync upload on the event loop. Block-payload helpers
+    (:meth:`image_block`) are pure and produce byte-for-byte identical output to
+    the sync class via the shared :func:`_image_block_payload`.
+    """
+
+    def __init__(self, client: AsyncNotionOps):
+        self._client = client
+
+    def _auth_headers(self, *, json_content: bool = False) -> dict[str, str]:
+        """Build Authorization + Notion-Version headers for direct HTTP calls."""
+        return _auth_headers(self._client, json_content=json_content)
+
+    @retry_on_transient_async
+    async def create(
+        self,
+        *,
+        filename: str,
+        content_type: str,
+        mode: str = "single_part",
+        number_of_parts: int | None = None,
+    ) -> dict[str, Any]:
+        """Async Step 1 — create a file upload (see :meth:`FileUploads.create`)."""
+        body: dict[str, Any] = {
+            "mode": mode,
+            "filename": filename,
+            "content_type": content_type,
+        }
+        if mode == "multi_part":
+            if not number_of_parts or number_of_parts < 1:
+                raise ValueError(
+                    "number_of_parts is required and must be >= 1 for multi_part mode"
+                )
+            body["number_of_parts"] = number_of_parts
+
+        headers = self._auth_headers(json_content=True)
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as http:
+                response = await http.post(
+                    _FILE_UPLOADS_ENDPOINT, json=body, headers=headers
+                )
+        except httpx.HTTPError as e:
+            raise NotionOpsError(f"File upload create request failed: {e}") from e
+
+        if response.status_code >= 500:
+            response.raise_for_status()
+        if response.status_code >= 400:
+            raise _map_http_error(response, operation="File upload create")
+
+        return response.json()
+
+    @retry_on_transient_async
+    async def send(
+        self,
+        upload_url: str,
+        file_bytes: bytes,
+        *,
+        filename: str,
+        content_type: str,
+    ) -> dict[str, Any]:
+        """Async Step 2 — send file bytes (see :meth:`FileUploads.send`)."""
+        headers = self._auth_headers(json_content=False)
+        files = {"file": (filename, file_bytes, content_type)}
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as http:
+                response = await http.post(upload_url, files=files, headers=headers)
+        except httpx.HTTPError as e:
+            raise NotionOpsError(f"File upload send request failed: {e}") from e
+
+        if response.status_code >= 500:
+            response.raise_for_status()
+        if response.status_code >= 400:
+            raise _map_http_error(response, operation="File upload send")
+
+        if not response.content:
+            return {}
+        try:
+            return response.json()
+        except ValueError:
+            return {"raw": response.text}
+
+    async def upload_file(
+        self,
+        path: str | Path,
+        *,
+        content_type: str | None = None,
+    ) -> str:
+        """Async high-level create + send (see :meth:`FileUploads.upload_file`)."""
+        p = Path(path)
+        if not p.exists():
+            raise FileNotFoundError(f"File not found: {p}")
+
+        ctype = content_type or _infer_content_type(p)
+        file_bytes = p.read_bytes()
+
+        created = await self.create(filename=p.name, content_type=ctype)
+        upload_id = created.get("id")
+        upload_url = created.get("upload_url")
+        if not upload_id or not upload_url:
+            raise NotionOpsError(
+                "Notion file_uploads.create response missing id or upload_url: "
+                f"{created!r}"
+            )
+
+        await self.send(
+            upload_url,
+            file_bytes,
+            filename=p.name,
+            content_type=ctype,
+        )
+        return upload_id
+
+    def image_block(
+        self,
+        upload_id: str,
+        *,
+        caption: str | None = None,
+    ) -> dict[str, Any]:
+        """Build an ``image`` block payload (pure; see :meth:`FileUploads.image_block`)."""
+        return _image_block_payload(upload_id, caption=caption)
+
+    async def upload_and_attach(
+        self,
+        path: str | Path,
+        *,
+        caption: str | None = None,
+    ) -> dict[str, Any]:
+        """Async upload + image-block (see :meth:`FileUploads.upload_and_attach`)."""
+        upload_id = await self.upload_file(path)
         return self.image_block(upload_id, caption=caption)

@@ -7,9 +7,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- `AsyncFileUploads` — async parity for the file-upload flow (`httpx.AsyncClient`
+  + `retry_on_transient_async`). `AsyncNotionOps.file_uploads` now exposes it, so
+  `await client.file_uploads.upload_file(...)` no longer blocks the event loop on
+  a synchronous multipart POST (audit F3).
 - Promoted the limit-aware publisher to top-level exports: `publish_block_tree`,
   `publish_markdown`, and `PublishResult` are now importable from `notion_ops`
   (and listed in `__all__`).
+
+### Changed
+- `FileUploads.create`/`send` now raise the same typed `NotionOpsError`
+  subclasses as every SDK-backed operation (`NotFoundError`, `AuthenticationError`,
+  `PermissionError`, `RateLimitError`, `ValidationError`, `ConflictError`) instead
+  of a bare `NotionOpsError` carrying the status string (audit F3). A 429 maps to
+  `RateLimitError` and is retried with backoff like the rest of the library.
 
 ### Changed
 - `PageTemplate` now publishes its body through `publish_block_tree` instead of

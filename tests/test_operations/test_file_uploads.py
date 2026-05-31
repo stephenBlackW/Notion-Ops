@@ -11,10 +11,19 @@ from unittest.mock import MagicMock, patch
 import pytest
 from httpx import Request, Response
 
-from notion_ops.client import NotionOps
-from notion_ops.exceptions import NotionOpsError
+from notion_ops.client import AsyncNotionOps, NotionOps
+from notion_ops.exceptions import (
+    AuthenticationError,
+    ConflictError,
+    NotFoundError,
+    NotionOpsError,
+    PermissionError,
+    RateLimitError,
+    ValidationError,
+)
 from notion_ops.operations.file_uploads import (
     _FILE_UPLOADS_ENDPOINT,
+    AsyncFileUploads,
     FileUploads,
     _infer_content_type,
 )
@@ -139,7 +148,10 @@ class TestCreate:
         with patch(
             "notion_ops.operations.file_uploads.httpx.post", return_value=resp
         ) as m:
-            with pytest.raises(NotionOpsError, match="404"):
+            # F3: 404 now maps to the typed NotFoundError (a NotionOpsError
+            # subclass), matching every SDK-backed operation, instead of a bare
+            # NotionOpsError carrying the status string.
+            with pytest.raises(NotFoundError):
                 file_uploads.create(filename="x.png", content_type="image/png")
 
         # 4xx → no retry
@@ -201,7 +213,7 @@ class TestSend:
         with patch(
             "notion_ops.operations.file_uploads.httpx.post", return_value=resp
         ) as m:
-            with pytest.raises(NotionOpsError, match="404"):
+            with pytest.raises(NotFoundError):
                 file_uploads.send(
                     "https://files.notion.com/up/x",
                     b"data",
@@ -376,3 +388,168 @@ class TestUploadAndAttach:
 class TestClientIntegration:
     def test_file_uploads_attribute_present(self, client):
         assert isinstance(client.file_uploads, FileUploads)
+
+
+# ---------------------------------------------------------------------------
+# F3: typed error mapping (httpx status -> NotionOpsError subclass)
+# ---------------------------------------------------------------------------
+
+
+class TestTypedErrorMapping:
+    """create()/send() raise the SAME typed subclasses as SDK-backed ops.
+
+    Binds audit F3: reverting to a bare ``NotionOpsError(...)`` would make every
+    type-specific assertion below fail (each subclass is a NotionOpsError, so a
+    bare raise would not satisfy ``pytest.raises(NotFoundError)`` etc.).
+    """
+
+    @pytest.mark.parametrize(
+        "status,exc_type",
+        [
+            (404, NotFoundError),
+            (401, AuthenticationError),
+            (403, PermissionError),
+            (400, ValidationError),
+            (422, ValidationError),
+            (409, ConflictError),
+        ],
+    )
+    def test_create_maps_status_to_typed_exception(
+        self, file_uploads, status, exc_type
+    ):
+        resp = _make_response(status, text="boom")
+        with patch(
+            "notion_ops.operations.file_uploads.httpx.post", return_value=resp
+        ) as m:
+            with pytest.raises(exc_type):
+                file_uploads.create(filename="x.png", content_type="image/png")
+        # 4xx is non-transient -> single attempt, no retry storm.
+        assert m.call_count == 1
+
+    def test_send_maps_403_to_permission_error(self, file_uploads):
+        resp = _make_response(403, text="no access", url="https://files.notion.com/u/x")
+        with patch(
+            "notion_ops.operations.file_uploads.httpx.post", return_value=resp
+        ):
+            with pytest.raises(PermissionError):
+                file_uploads.send(
+                    "https://files.notion.com/u/x",
+                    b"data",
+                    filename="x.png",
+                    content_type="image/png",
+                )
+
+    def test_create_429_maps_to_ratelimit_and_retries(self, file_uploads):
+        """429 -> RateLimitError, which retry_on_transient treats as transient."""
+        busy = _make_response(429, text="slow down")
+        good = _make_response(
+            200, json_body={"id": "u-ok", "upload_url": "https://files.notion.com/u/ok"}
+        )
+        with patch(
+            "notion_ops.operations.file_uploads.httpx.post",
+            side_effect=[busy, good],
+        ) as m, patch("notion_ops.utils.retry.time.sleep"):
+            result = file_uploads.create(filename="x.png", content_type="image/png")
+        assert result["id"] == "u-ok"
+        assert m.call_count == 2
+
+    def test_create_429_exhausted_raises_ratelimit(self, file_uploads):
+        busy = _make_response(429, text="slow down")
+        with patch(
+            "notion_ops.operations.file_uploads.httpx.post", return_value=busy
+        ), patch("notion_ops.utils.retry.time.sleep"):
+            with pytest.raises(RateLimitError):
+                file_uploads.create(filename="x.png", content_type="image/png")
+
+
+# ---------------------------------------------------------------------------
+# F3: AsyncFileUploads parity
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def async_client():
+    """An AsyncNotionOps client with the underlying SDK stubbed out."""
+    with patch.dict("os.environ", {"NOTION_API_KEY": "secret-test"}):
+        with patch("notion_ops.client.AsyncClient"):
+            c = AsyncNotionOps()
+            c._notion = MagicMock()
+            return c
+
+
+@pytest.fixture
+def async_file_uploads(async_client):
+    return AsyncFileUploads(async_client)
+
+
+def _async_post_patch(side_effect=None, return_value=None):
+    """Patch httpx.AsyncClient so .post() is awaitable and the cm is async."""
+    from unittest.mock import AsyncMock
+
+    post = AsyncMock(side_effect=side_effect, return_value=return_value)
+    instance = MagicMock()
+    instance.post = post
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=instance)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    return patch(
+        "notion_ops.operations.file_uploads.httpx.AsyncClient", return_value=cm
+    ), post
+
+
+class TestAsyncFileUploads:
+    async def test_async_create_posts_body(self, async_file_uploads):
+        resp = _make_response(
+            200, json_body={"id": "a-1", "upload_url": "https://files.notion.com/a/1"}
+        )
+        patcher, post = _async_post_patch(return_value=resp)
+        with patcher:
+            result = await async_file_uploads.create(
+                filename="figure.png", content_type="image/png"
+            )
+        assert result["id"] == "a-1"
+        post.assert_awaited_once()
+        assert post.call_args.args[0] == _FILE_UPLOADS_ENDPOINT
+        assert post.call_args.kwargs["json"]["filename"] == "figure.png"
+
+    async def test_async_upload_file_create_then_send(
+        self, async_file_uploads, tmp_path
+    ):
+        png = tmp_path / "fig.png"
+        png.write_bytes(b"\x89PNGdata")
+        create_resp = _make_response(
+            200, json_body={"id": "a-2", "upload_url": "https://files.notion.com/a/2"}
+        )
+        send_resp = _make_response(200, json_body={"id": "a-2", "status": "uploaded"})
+        patcher, post = _async_post_patch(side_effect=[create_resp, send_resp])
+        with patcher:
+            upload_id = await async_file_uploads.upload_file(png)
+        assert upload_id == "a-2"
+        assert post.await_count == 2
+
+    async def test_async_create_maps_typed_error(self, async_file_uploads):
+        resp = _make_response(404, text="missing")
+        patcher, _ = _async_post_patch(return_value=resp)
+        with patcher:
+            with pytest.raises(NotFoundError):
+                await async_file_uploads.create(
+                    filename="x.png", content_type="image/png"
+                )
+
+    def test_async_image_block_matches_sync(self, async_file_uploads, file_uploads):
+        """Pure helper: async + sync produce byte-for-byte identical payloads."""
+        assert async_file_uploads.image_block(
+            "u-x", caption="cap"
+        ) == file_uploads.image_block("u-x", caption="cap")
+
+
+class TestAsyncClientWiring:
+    def test_async_client_uses_async_file_uploads(self, async_client):
+        """The async client must expose AsyncFileUploads, not the sync class.
+
+        Regression for the F3 defect: AsyncNotionOps previously wired the
+        synchronous FileUploads, so `await client.file_uploads.create(...)`
+        raised (coroutine-less) and blocked the event loop.
+        """
+        assert isinstance(async_client.file_uploads, AsyncFileUploads)
+        assert not isinstance(async_client.file_uploads, FileUploads)
