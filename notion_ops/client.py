@@ -10,7 +10,7 @@ from notion_ops.models.page import Page
 from notion_ops.operations.blocks import AsyncBlockOperations, BlockOperations
 from notion_ops.operations.data_sources import AsyncDataSourceOperations, DataSourceOperations
 from notion_ops.operations.databases import AsyncDatabaseOperations, DatabaseOperations
-from notion_ops.operations.file_uploads import FileUploads
+from notion_ops.operations.file_uploads import AsyncFileUploads, FileUploads
 from notion_ops.operations.pages import AsyncPageOperations, PageOperations
 from notion_ops.operations.users import AsyncUserOperations, UserOperations
 
@@ -199,9 +199,10 @@ class AsyncNotionOps:
         self.data_sources = AsyncDataSourceOperations(self)
         self.blocks = AsyncBlockOperations(self)
         self.users = AsyncUserOperations(self)
-        # File uploads are exposed even on the async client; the upload flow
-        # itself is synchronous (direct multipart POST to a pre-signed URL).
-        self.file_uploads = FileUploads(self)
+        # Async file uploads: httpx.AsyncClient-backed parity with the sync
+        # client so `await client.file_uploads.upload_file(...)` does not block
+        # the event loop on a synchronous multipart POST (audit F3).
+        self.file_uploads = AsyncFileUploads(self)
 
     @property
     def api(self) -> AsyncClient:

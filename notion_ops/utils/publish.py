@@ -73,10 +73,20 @@ class AppendRequest:
 
 @dataclass
 class PublishResult:
-    """Outcome of executing a publish plan."""
+    """Outcome of executing a publish plan.
+
+    ``partial`` is ``True`` when one or more deferred (follow-up) appends could
+    not be executed because the parent block id was not returned by the
+    preceding request — i.e. some nested content was dropped. ``skipped_followups``
+    counts the dropped follow-up requests. Callers that need every block to land
+    (e.g. AOS atom publishing) can branch on ``partial`` instead of scraping the
+    logs (HL-patchA-1).
+    """
 
     request_count: int
     top_level_block_ids: list[str]
+    partial: bool = False
+    skipped_followups: int = 0
 
 
 def _children_of(block: dict[str, Any]) -> list[dict[str, Any]]:
@@ -306,7 +316,7 @@ def execute_plan(
         )
         return result if isinstance(result, dict) else {}
 
-    state = {"count": 0}
+    state = {"count": 0, "skipped": 0}
     top_level_ids: list[str] = []
 
     def run(
@@ -331,17 +341,22 @@ def execute_plan(
                 if parent:
                     run(followup.requests, parent, None)
                 else:
+                    dropped = count_requests(followup.requests)
+                    state["skipped"] += dropped
                     logger.warning(
                         "No parent id returned for deferred append at index %s; "
                         "skipping %d follow-up request(s). Nested content may be "
                         "incomplete.",
                         followup.parent_index,
-                        count_requests(followup.requests),
+                        dropped,
                     )
 
     run(plan, extract_notion_id(parent_id), top_level_ids)
     return PublishResult(
-        request_count=state["count"], top_level_block_ids=top_level_ids
+        request_count=state["count"],
+        top_level_block_ids=top_level_ids,
+        partial=state["skipped"] > 0,
+        skipped_followups=state["skipped"],
     )
 
 
@@ -372,3 +387,117 @@ def publish_markdown(
 ) -> PublishResult:
     """Convert *markdown* to blocks and publish them under *parent_id*."""
     return publish_block_tree(client, parent_id, markdown_to_blocks(markdown), **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Idempotent republish (ISS-012)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RepublishResult(PublishResult):
+    """Outcome of an idempotent republish.
+
+    Extends :class:`PublishResult` with ``deleted_count`` — the number of
+    pre-existing top-level child blocks cleared before the new tree was
+    published.
+    """
+
+    deleted_count: int = 0
+
+
+def _existing_top_level_ids(client: Any, parent_id: str) -> list[str]:
+    """List the ids of the top-level child blocks currently under *parent_id*.
+
+    Paginated and retry-wrapped, matching :func:`execute_plan`'s use of the raw
+    SDK (``client.api``) so the publisher stays decoupled from the operations
+    layer.
+    """
+
+    @retry_on_transient
+    def _list(block_id: str, cursor: str | None) -> dict[str, Any]:
+        params: dict[str, Any] = {"block_id": block_id, "page_size": 100}
+        if cursor:
+            params["start_cursor"] = cursor
+        result = client.api.blocks.children.list(**params)
+        return result if isinstance(result, dict) else {}
+
+    ids: list[str] = []
+    cursor: str | None = None
+    while True:
+        response = _list(parent_id, cursor)
+        for block in response.get("results", []) or []:
+            bid = block.get("id")
+            if bid:
+                ids.append(bid)
+        if not response.get("has_more"):
+            break
+        cursor = response.get("next_cursor")
+        if not cursor:
+            break
+    return ids
+
+
+def _delete_block(client: Any, block_id: str) -> None:
+    """Archive (delete) a single block, retry-wrapped."""
+
+    @retry_on_transient
+    def _delete(bid: str) -> None:
+        client.api.blocks.delete(block_id=bid)
+
+    _delete(block_id)
+
+
+def republish_block_tree(
+    client: Any,
+    parent_id: str,
+    blocks: list[dict[str, Any]],
+    **kwargs: Any,
+) -> RepublishResult:
+    """Idempotently (re)publish *blocks* under *parent_id*.
+
+    Unlike :func:`publish_block_tree`, which always **appends** (so calling it
+    twice duplicates content), this clears the existing top-level children under
+    *parent_id* first, then publishes the new tree. Running it repeatedly with
+    the same input converges to the same page content — exactly what a re-run of
+    an atom/report publish needs (Notion has no native "replace children" op).
+
+    Contract: the *content* is idempotent (no accumulation across runs); block
+    **ids are not stable** — cleared blocks are archived and recreated, not
+    diffed in place. A minimal-write content diff is a future optimization
+    (HL-cycle1-1); this is the robust, limit-aware keep-in-sync primitive.
+
+    **Not atomic:** the clear and the republish are separate request batches. If
+    the process is interrupted (or a non-transient error such as a 4xx on a
+    delete aborts the clear), the page can be left empty or partially cleared —
+    a re-run converges it again, but there is no transactional rollback. Notion
+    exposes no multi-block transaction, so callers needing all-or-nothing must
+    wrap this themselves.
+
+    ``**kwargs`` are forwarded to :func:`publish_block_tree` (the limit knobs).
+    """
+    parent = extract_notion_id(parent_id)
+    existing = _existing_top_level_ids(client, parent)
+    for block_id in existing:
+        _delete_block(client, block_id)
+
+    published = publish_block_tree(client, parent, blocks, **kwargs)
+    return RepublishResult(
+        request_count=published.request_count,
+        top_level_block_ids=published.top_level_block_ids,
+        partial=published.partial,
+        skipped_followups=published.skipped_followups,
+        deleted_count=len(existing),
+    )
+
+
+def republish_markdown(
+    client: Any,
+    parent_id: str,
+    markdown: str,
+    **kwargs: Any,
+) -> RepublishResult:
+    """Convert *markdown* to blocks and idempotently republish under *parent_id*."""
+    return republish_block_tree(
+        client, parent_id, markdown_to_blocks(markdown), **kwargs
+    )

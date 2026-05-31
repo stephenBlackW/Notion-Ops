@@ -63,6 +63,41 @@ jobs:
       # Job is continue-on-error until those known errors are resolved.
       - run: mypy notion_ops
 
+  # --- nops-security-A: scanners-first (deterministic security foundation) ---
+  # ruff S (flake8-bandit) is enforced by the `lint` job via pyproject
+  # [tool.ruff.lint] extend-select. These two jobs add dependency-vuln + secret
+  # scanning. pip-audit is advisory to start (same precedent as the mypy job):
+  # it audits the runner's installed closure, which can flag upstream advisories
+  # the project cannot directly fix. Flip to blocking once the closure is clean.
+  pip-audit:
+    name: pip-audit (deps)
+    runs-on: ubuntu-latest
+    continue-on-error: true   # advisory; flip to blocking when the closure is clean (HL-securityA-1)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e "." pip-audit
+      # Audit only the project's own dependency closure (skip the package itself,
+      # which is not on PyPI yet, and the runner's build tooling).
+      - run: pip-audit --skip-editable --desc
+
+  secret-scan:
+    name: gitleaks (secrets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so gitleaks scans every commit
+      - name: Install gitleaks
+        run: |
+          GITLEAKS_VERSION=8.21.2
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz -C /usr/local/bin gitleaks
+      - name: Scan git history for secrets
+        run: gitleaks detect --redact --verbose --no-banner
+
   build:
     name: build wheel + sdist
     runs-on: ubuntu-latest

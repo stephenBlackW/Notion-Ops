@@ -42,8 +42,11 @@ from notion_ops.utils.ids import extract_notion_id
 from notion_ops.utils.markdown import markdown_to_blocks
 from notion_ops.utils.publish import (
     PublishResult,
+    RepublishResult,
     publish_block_tree,
     publish_markdown,
+    republish_block_tree,
+    republish_markdown,
 )
 from notion_ops.utils.repair import blocks_to_markdown, repair_blocks
 
@@ -101,4 +104,8 @@ __all__ = [
     "publish_block_tree",
     "publish_markdown",
     "PublishResult",
+    # Idempotent republish (ISS-012) — re-run-safe keep-in-sync
+    "republish_block_tree",
+    "republish_markdown",
+    "RepublishResult",
 ]
