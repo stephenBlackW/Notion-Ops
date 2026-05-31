@@ -52,6 +52,7 @@ for page in results.pages:
 - **Block Builders**: Easy creation of all Notion block types
 - **Pagination Helpers**: Automatic handling of paginated results
 - **Rich Text Utilities**: Convert between plain text, rich text, and markdown
+- **Limit-Aware Publishing**: Publish Markdown or arbitrarily-nested block trees in the minimum number of requests, automatically respecting Notion's 2-level inline-nesting cap, the 100-children-per-request limit, >100-row table splitting, and payload-size limits — no manual batching
 
 ## API Reference
 
@@ -196,6 +197,30 @@ Blocks.divider()
 Blocks.image("https://...")
 Blocks.bookmark("https://...")
 ```
+
+### Publishing Markdown & nested content
+
+`blocks.children.append` accepts at most two levels of nesting and 100 children
+per request, and large tables or deeply-nested content must be split across
+follow-up requests. `publish_block_tree` / `publish_markdown` plan and execute
+the minimum sequence of appends that respects every one of those limits for you.
+
+```python
+from notion_ops import NotionOps, publish_markdown, publish_block_tree, markdown_to_blocks
+
+client = NotionOps()
+
+# Publish a Markdown document (tables, nested lists, code, toggles, ...) under a page.
+result = publish_markdown(client, "page_id", "# Report\n\n| a | b |\n| - | - |\n...")
+print(result.request_count, result.top_level_block_ids)
+
+# Or publish an already-built nested block tree.
+blocks = markdown_to_blocks(some_markdown)
+publish_block_tree(client, "page_id", blocks)
+```
+
+`PageTemplate` publishes its body through the same path, so templated pages get
+the same limit-handling automatically.
 
 ## Property Types
 
