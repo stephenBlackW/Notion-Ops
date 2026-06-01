@@ -217,6 +217,15 @@ print(result.request_count, result.top_level_block_ids)
 # Or publish an already-built nested block tree.
 blocks = markdown_to_blocks(some_markdown)
 publish_block_tree(client, "page_id", blocks)
+
+# Idempotent republish: re-running refreshes the page instead of duplicating it.
+# Clears the existing top-level children, then publishes the new tree — exactly
+# what you want when re-publishing a report/atom. Content is idempotent; block
+# ids are not stable (cleared blocks are archived + recreated), and the clear +
+# publish are not a single transaction.
+from notion_ops import republish_markdown
+result = republish_markdown(client, "page_id", "# Report (v2)\n\nupdated body")
+print(result.deleted_count, result.request_count)
 ```
 
 `PageTemplate` publishes its body through the same path, so templated pages get

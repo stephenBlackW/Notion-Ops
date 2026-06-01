@@ -65,3 +65,15 @@ testpaths = ["tests"]
 markers = [
     "e2e: end-to-end tests requiring a live Notion workspace (NOTION_API_KEY)",
 ]
+
+[tool.ruff.lint]
+# extend-select keeps ruff's defaults (E4/E7/E9, F) and adds:
+#   S = flake8-bandit (security lint) — nops-security-A scanners-first.
+# Library code is held to S; the existing notion_ops surface is already clean.
+extend-select = ["S"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests legitimately use `assert` (S101) and other patterns bandit flags in
+# library code but that are correct in a pytest suite.
+"tests/**" = ["S"]
+
