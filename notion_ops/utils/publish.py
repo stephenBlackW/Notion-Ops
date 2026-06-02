@@ -299,8 +299,8 @@ def _plan_append(
     the Followup before the frame runs, so request ordering is preserved.
 
     Key invariants preserved vs the recursive form:
-    - Requests within a sibling group are ordered left-to-right (pop order on stack
-      is reversed, then reversed back -- see implementation).
+    - Requests within a sibling group are ordered left-to-right: each sibling group
+      is processed in a single _process_sibling_group call (no reversal needed).
     - Followups are keyed by parent_index within the AppendRequest they hang off.
     - _total_blocks(inlined) is always called on the stripped/split/inlined node,
       never on the deep subtree (same as before).
@@ -406,12 +406,31 @@ def _process_sibling_group(
 
 
 def count_requests(plan: list[AppendRequest]) -> int:
-    """Total number of append API calls a plan will make (incl. follow-ups)."""
+    """Total number of append API calls a plan will make (incl. follow-ups).
+
+    ISS-019-rev3 (security-redteam-campaign-RUN Phase C rev3): de-recursed from a
+    recursive self-call (the pre-rev3 version called count_requests(followup.requests)
+    at each level) to an iterative explicit-stack traversal.  This closes the FINAL
+    recursive site in the publish planner: a depth-3000 plan (produced by
+    build_publish_plan on a deep linear-chain tree) previously raised RecursionError
+    because execute_plan's dropped-parent path calls count_requests(followup.requests)
+    on a followup whose requests chain is as deep as the original tree.
+
+    The iterative form is output-identical to the recursive form: it counts every
+    AppendRequest object in the tree (each request + all transitively-nested followup
+    requests).  The traversal uses an explicit work-stack (LIFO); push order matches
+    DFS pre-order, which counts every node exactly once regardless of traversal order.
+    """
     total = 0
-    for request in plan:
-        total += 1
-        for followup in request.followups:
-            total += count_requests(followup.requests)
+    # Work stack holds lists of AppendRequest objects to process.
+    stack: list[list[AppendRequest]] = [plan]
+    while stack:
+        requests = stack.pop()
+        for request in requests:
+            total += 1
+            for followup in request.followups:
+                if followup.requests:
+                    stack.append(followup.requests)
     return total
 
 

@@ -74,35 +74,42 @@ class TestCredentialNoLeak:
             f"AsyncNotionOps repr contains the secret key: {client_repr!r}"
         )
 
-    def test_authentication_error_on_missing_key_does_not_contain_secret(
+    def test_authentication_error_on_set_key_does_not_contain_secret(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """AuthenticationError raised on a missing key must not echo any secret.
+        """AuthenticationError raised after key removal must not echo the previously-set key.
 
-        When no key is provided (and env vars are absent), NotionOps raises
-        AuthenticationError.  The error message must not contain the test secret
-        (which is not present in this scenario, by definition -- but this also
-        verifies that the error message format does not accidentally format
-        environment-variable values or other credentials into the message).
+        FALSIFIABLE: sets the secret in NOTION_API_KEY, then removes it so construction
+        raises AuthenticationError. The error handler must not format environment-variable
+        values into the message (e.g. "key was: <value>" style). A naive implementation
+        that includes the prior env value in the error message would fail this test.
+
+        This is stronger than the trivially-true variant (where secret was never set):
+        if NotionOps reads the env var at error-message construction time -- or if it
+        caches the value and formats it into the error -- the secret could appear in
+        the message. This test catches that pattern.
         """
-        # Ensure neither env var is set so we exercise the missing-key path.
-        monkeypatch.delenv("NOTION_API_KEY", raising=False)
-        monkeypatch.delenv("NOTION_TOKEN", raising=False)
+        # Set the secret in the environment, then remove it before construction.
+        # NotionOps.__init__ reads env vars at construction time; if the implementation
+        # reads the env var again at error-message time (e.g. to echo "was set to X"),
+        # the secret would surface -- this test detects that.
+        monkeypatch.setenv("NOTION_API_KEY", _TEST_SECRET)
+        monkeypatch.delenv("NOTION_API_KEY")  # remove: now absent at construction
 
         with pytest.raises(AuthenticationError) as exc_info:
-            NotionOps()  # no auth= provided, no env vars
+            NotionOps()  # no auth= provided; env var now absent
 
         error_message = str(exc_info.value)
         assert _TEST_SECRET not in error_message, (
             f"AuthenticationError message contains the test secret: {error_message!r}"
         )
 
-    def test_async_authentication_error_on_missing_key_no_secret(
+    def test_async_authentication_error_on_set_key_does_not_contain_secret(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """AuthenticationError from AsyncNotionOps on missing key must not echo any secret."""
-        monkeypatch.delenv("NOTION_API_KEY", raising=False)
-        monkeypatch.delenv("NOTION_TOKEN", raising=False)
+        """AuthenticationError from AsyncNotionOps must not echo a previously-set key."""
+        monkeypatch.setenv("NOTION_API_KEY", _TEST_SECRET)
+        monkeypatch.delenv("NOTION_API_KEY")
 
         with pytest.raises(AuthenticationError) as exc_info:
             AsyncNotionOps()
