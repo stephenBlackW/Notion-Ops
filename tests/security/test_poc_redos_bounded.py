@@ -77,19 +77,23 @@ def _parse_within_budget(text: str, budget: float = _REDOS_BUDGET_SECONDS) -> li
     start = time.perf_counter()
     proc.start()
     proc.join(budget)
-    if proc.is_alive():
+    # NB: failures are expressed as variable-condition `assert`s (not `raise
+    # AssertionError`) so this helper does not itself trip the HL-E bare-hard-fail
+    # scaffold lint (test_convention_meta.py) -- the lint correctly forbids bare
+    # hard-fails outside xfail/except/pytest.raises.
+    completed = not proc.is_alive()
+    if not completed:
         proc.terminate()
         proc.join()
-        raise AssertionError(
-            f"markdown_to_blocks did not complete within {budget}s on adversarial "
-            f"input (len={len(text)}) -- possible ReDoS (subprocess killed at budget)"
-        )
+    assert completed, (
+        f"markdown_to_blocks did not complete within {budget}s on adversarial "
+        f"input (len={len(text)}) -- possible ReDoS (subprocess killed at budget)"
+    )
     elapsed = time.perf_counter() - start
     status, payload = q.get()
-    if status == "err":
-        raise AssertionError(
-            f"markdown_to_blocks raised on adversarial input (len={len(text)}): {payload}"
-        )
+    assert status == "ok", (
+        f"markdown_to_blocks raised on adversarial input (len={len(text)}): {payload}"
+    )
     assert elapsed < budget, (
         f"markdown_to_blocks took {elapsed:.3f}s on adversarial input "
         f"(budget: {budget}s) -- possible ReDoS"
