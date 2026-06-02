@@ -100,11 +100,38 @@ def _children_of(block: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _height(block: dict[str, Any]) -> int:
-    """Height of a block's subtree (0 for a block with no children)."""
-    children = _children_of(block)
-    if not children:
-        return 0
-    return 1 + max(_height(child) for child in children)
+    """Height of a block's subtree (0 for a block with no children).
+
+    ISS-019 (security-redteam-campaign-RUN Phase C): rewritten as an iterative
+    stack-based post-order traversal to eliminate RecursionError on deep linear-
+    chain trees (depth ≥500 would exhaust Python's default call-stack limit=1000
+    when multiplied across the three helpers called by _can_inline).
+    """
+    # Iterative post-order with an explicit stack.
+    # Each stack entry is (block, child_iterator, max_child_height).
+    # When child_iterator is exhausted the block's height = 1 + max_child_height.
+    stack: list[tuple[dict[str, Any], int, list[dict[str, Any]], int]] = []
+    # (block, child_index, children, max_child_height_so_far)
+    stack.append((block, 0, _children_of(block), -1))
+    heights: dict[int, int] = {}  # id(block) -> computed height
+
+    while stack:
+        cur_block, child_idx, children, max_ch = stack[-1]
+        if child_idx < len(children):
+            child = children[child_idx]
+            stack[-1] = (cur_block, child_idx + 1, children, max_ch)
+            child_children = _children_of(child)
+            stack.append((child, 0, child_children, -1))
+        else:
+            # All children processed; compute this block's height
+            h = 0 if max_ch < 0 else 1 + max_ch
+            heights[id(cur_block)] = h
+            stack.pop()
+            if stack:
+                parent, p_idx, p_children, p_max = stack[-1]
+                stack[-1] = (parent, p_idx, p_children, max(p_max, h))
+
+    return heights.get(id(block), 0)
 
 
 def _without_children(block: dict[str, Any]) -> dict[str, Any]:
@@ -134,16 +161,34 @@ def _with_children(
 
 
 def _total_blocks(block: dict[str, Any]) -> int:
-    """Total number of blocks in a subtree, including the block itself."""
-    return 1 + sum(_total_blocks(child) for child in _children_of(block))
+    """Total number of blocks in a subtree, including the block itself.
+
+    ISS-019 (security-redteam-campaign-RUN Phase C): rewritten as an iterative
+    stack-based pre-order traversal to eliminate RecursionError on deep trees.
+    """
+    total = 0
+    stack: list[dict[str, Any]] = [block]
+    while stack:
+        node = stack.pop()
+        total += 1
+        stack.extend(_children_of(node))
+    return total
 
 
 def _max_children_count(block: dict[str, Any]) -> int:
-    """Largest single ``children`` array anywhere in the subtree."""
-    children = _children_of(block)
-    maximum = len(children)
-    for child in children:
-        maximum = max(maximum, _max_children_count(child))
+    """Largest single ``children`` array anywhere in the subtree.
+
+    ISS-019 (security-redteam-campaign-RUN Phase C): rewritten as an iterative
+    stack-based traversal to eliminate RecursionError on deep trees.
+    """
+    maximum = 0
+    stack: list[dict[str, Any]] = [block]
+    while stack:
+        node = stack.pop()
+        children = _children_of(node)
+        if len(children) > maximum:
+            maximum = len(children)
+        stack.extend(children)
     return maximum
 
 
