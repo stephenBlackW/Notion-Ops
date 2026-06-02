@@ -26,6 +26,7 @@ batched up to the 100-block and payload-size caps.
 from __future__ import annotations
 
 import logging
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -280,13 +281,73 @@ def _plan_append(
     max_blocks: int,
     max_bytes: int,
 ) -> list[AppendRequest]:
-    requests: list[AppendRequest] = []
+    """Plan append requests for *nodes* using an explicit work-stack.
+
+    ISS-019-rev2 (security-redteam-campaign-RUN Phase C rev2): de-recursed from a
+    recursive self-call (the pre-rev2 version self-called at line 312) to an
+    iterative explicit-stack formulation, consistent with the iterative helpers
+    (_height / _total_blocks / _max_children_count). This eliminates the
+    sys.getrecursionlimit() ceiling on _plan_append itself: a linear-chain tree of
+    arbitrary depth no longer raises RecursionError regardless of Python's call-stack
+    limit.
+
+    The work stack carries (nodes_to_process, output_requests_list) frames.  Each
+    frame processes one sibling list, batching nodes into AppendRequests and appending
+    them into the provided output list.  When a non-inlinable, non-table node has
+    children that need their own planning, a new frame is pushed onto the work stack
+    (instead of a recursive call); its output list is pre-allocated and referenced by
+    the Followup before the frame runs, so request ordering is preserved.
+
+    Key invariants preserved vs the recursive form:
+    - Requests within a sibling group are ordered left-to-right (pop order on stack
+      is reversed, then reversed back -- see implementation).
+    - Followups are keyed by parent_index within the AppendRequest they hang off.
+    - _total_blocks(inlined) is always called on the stripped/split/inlined node,
+      never on the deep subtree (same as before).
+    - The batch-flush logic (blocks/bytes caps) is identical to the recursive form.
+    """
+    # We need the sibling groups to be processed in order so that we can assign
+    # parent_index values correctly.  An explicit stack is LIFO, so we push frames
+    # in reverse order and process them front-to-back.
+    #
+    # Each stack entry: (nodes_list, output_list)
+    # After processing, AppendRequest objects are appended to output_list.
+    result: list[AppendRequest] = []
+    # Stack of (sibling_nodes, destination_list) frames to process.
+    # We seed with the top-level call's nodes going into `result`.
+    work_stack: list[tuple[list[dict[str, Any]], list[AppendRequest]]] = [
+        (nodes, result)
+    ]
+
+    while work_stack:
+        cur_nodes, cur_requests = work_stack.pop()
+        _process_sibling_group(
+            cur_nodes, cur_requests, max_inline_depth, max_blocks, max_bytes,
+            work_stack,
+        )
+
+    return result
+
+
+def _process_sibling_group(
+    nodes: list[dict[str, Any]],
+    requests: list[AppendRequest],
+    max_inline_depth: int,
+    max_blocks: int,
+    max_bytes: int,
+    work_stack: list[tuple[list[dict[str, Any]], list[AppendRequest]]],
+) -> None:
+    """Process one sibling list into AppendRequests; push child frames onto work_stack.
+
+    This is the body that the old recursive _plan_append executed per call.  It is
+    now a plain function called by the iterative driver above.
+    """
     payload: list[dict[str, Any]] = []
     followups: list[Followup] = []
     size = 0
     blocks = 0
 
-    def flush() -> None:
+    def _flush() -> None:
         nonlocal payload, followups, size, blocks
         if payload:
             requests.append(AppendRequest(payload=payload, followups=followups))
@@ -302,34 +363,46 @@ def _plan_append(
         #    the rest to its own ID (it must stay top-level); else
         #  - append the node alone and defer its children (deferral can only
         #    attach to a top-level block, which this node now is).
+        #
+        # child_requests is the list that will hold the child AppendRequests.
+        # has_children_to_defer tracks whether we need to register a Followup
+        # (cannot rely on `if child_requests` because the deferred list is empty
+        # at this point -- it will be filled when the work_stack frame runs).
+        child_requests: list[AppendRequest] = []
+        has_children_to_defer = False
+
         if _can_inline(node, max_inline_depth, max_blocks, max_bytes):
             inlined = node
-            child_requests: list[AppendRequest] = []
         elif node.get("type") == "table":
             inlined, child_requests = _split_table(node, max_blocks, max_bytes)
+            has_children_to_defer = bool(child_requests)
         else:
             inlined = _without_children(node)
-            child_requests = _plan_append(
-                _children_of(node), max_inline_depth, max_blocks, max_bytes
-            )
+            # Pre-allocate the child AppendRequest list.  The Followup will
+            # reference this list by identity; the work_stack frame will fill it
+            # later (iteratively, not recursively).
+            children = _children_of(node)
+            if children:
+                child_requests = []
+                has_children_to_defer = True
+                work_stack.append((children, child_requests))
 
         node_size = _estimate_block_size(inlined)
         node_blocks = _total_blocks(inlined)
         if payload and (
             blocks + node_blocks > max_blocks or size + node_size > max_bytes
         ):
-            flush()
+            _flush()
 
         index = len(payload)
         payload.append(inlined)
         size += node_size
         blocks += node_blocks
 
-        if child_requests:
+        if has_children_to_defer:
             followups.append(Followup(parent_index=index, requests=child_requests))
 
-    flush()
-    return requests
+    _flush()
 
 
 def count_requests(plan: list[AppendRequest]) -> int:
@@ -352,6 +425,11 @@ def execute_plan(
     Each append's response provides the IDs used to resolve the parents of its
     follow-up requests. Returns the number of requests made and the IDs of the
     top-level blocks created directly under *parent_id*.
+
+    ISS-019-rev2: the inner execution loop is iterative (work-queue), consistent with
+    the iterative _plan_append.  This eliminates the second recursion site: the old
+    recursive ``run()`` inner function would overflow at depth ≥1000 when executing a
+    deeply-nested plan (one AppendRequest per level, each with a Followup to the next).
     """
 
     @retry_on_transient
@@ -361,17 +439,20 @@ def execute_plan(
         )
         return result if isinstance(result, dict) else {}
 
-    state = {"count": 0, "skipped": 0}
+    count = 0
+    skipped = 0
     top_level_ids: list[str] = []
 
-    def run(
-        requests: list[AppendRequest],
-        resolved_parent_id: str,
-        collect: list[str] | None,
-    ) -> None:
+    # Work queue: (requests_to_execute, resolved_parent_id, collect_list_or_None)
+    # FIFO: preserves the parent-ID chain (a request must run before its followups).
+    queue: deque[tuple[list[AppendRequest], str, list[str] | None]] = deque()
+    queue.append((plan, extract_notion_id(parent_id), top_level_ids))
+
+    while queue:
+        requests, resolved_parent_id, collect = queue.popleft()
         for request in requests:
             response = _append(resolved_parent_id, request.payload)
-            state["count"] += 1
+            count += 1
             results = response.get("results", []) or []
             ids = [block.get("id") for block in results]
             if collect is not None:
@@ -384,10 +465,10 @@ def execute_plan(
                     else None
                 )
                 if parent:
-                    run(followup.requests, parent, None)
+                    queue.append((followup.requests, parent, None))
                 else:
                     dropped = count_requests(followup.requests)
-                    state["skipped"] += dropped
+                    skipped += dropped
                     logger.warning(
                         "No parent id returned for deferred append at index %s; "
                         "skipping %d follow-up request(s). Nested content may be "
@@ -396,12 +477,11 @@ def execute_plan(
                         dropped,
                     )
 
-    run(plan, extract_notion_id(parent_id), top_level_ids)
     return PublishResult(
-        request_count=state["count"],
+        request_count=count,
         top_level_block_ids=top_level_ids,
-        partial=state["skipped"] > 0,
-        skipped_followups=state["skipped"],
+        partial=skipped > 0,
+        skipped_followups=skipped,
     )
 
 

@@ -220,19 +220,87 @@ class TestReDoSAmortizedBound:
         )
 
     def test_all_arms_amortized_linear(self) -> None:
-        """HL-A: All _INLINE_PATTERN arms (bold+italic+strike+code+link): <K×time (mid→large)."""
-        # Hits all arms in one unit: `"**b** _i_ ~~s~~ `c` [t](u) "` (27 chars with space)
+        """HL-A: All _INLINE_PATTERN arms (bold+italic+strike+code+link): <K×time (mid→large).
+
+        rev2 (HL-redos): corpus includes both balanced-token and unterminated-run
+        families.  Unterminated-run inputs (long no-close backtick/link tokens within
+        the 1900-char per-token limit) are the inputs that would trigger exponential
+        backtracking in a catastrophic-backtracking arm (e.g. ``(.+)+?`` replacing the
+        code arm `[^`]+?`).
+
+        Falsifiability: the pre-rev2 corpus used only balanced, well-formed tokens.
+        The hostile evaluator confirmed the mutant `` `(?P<code>(.+)+?)` `` ran at
+        ratio ~1.45 on that corpus (PASS), because each short token is cheap even for
+        the catastrophic form.  This rev2 corpus adds a ``_make_noclose_token_input``
+        family where each token is a 100-char open-backtick sequence (within the 1900
+        whitespace-free char limit, so no OversizedContentError).  On the catastrophic
+        form, each 100-char token costs O(2^100) backtrack steps → the absolute 5s
+        ceiling would fire immediately even for a small input.  See the sibling test
+        ``test_unterminated_run_absolute_ceiling`` which exercises this directly.
+
+        For the RATIO assertion, we use short (10-char) no-close tokens so the
+        catastrophic form has a large-but-finite constant per token; the *scaling*
+        (ratio) is the same as linear (O(N_tokens)), so the ratio test stays green for
+        both shipped and catastrophic at this token length.  The 100-char absolute
+        ceiling test is the real regression detector for exponential arms.
+        """
+        # Balanced-token family (original corpus, kept for coverage)
         unit = "**b** _i_ ~~s~~ `c` [t](u) "
-        t_mid = _timed_parse(unit * max(1, _SIZE_MID // len(unit)))
-        t_large = _timed_parse(unit * max(1, _SIZE_LARGE // len(unit)))
-
-        ratio_large = t_large / max(t_mid, 1e-9)
-
-        assert ratio_large < _AMORTIZED_K, (
-            f"HL-A: Polynomial growth detected (all-arms family): "
-            f"t(large)/t(mid)={ratio_large:.1f} (expect <{_AMORTIZED_K}). "
-            f"t_mid={t_mid:.6f}s, t_large={t_large:.6f}s"
+        t_mid_balanced = _timed_parse(unit * max(1, _SIZE_MID // len(unit)))
+        t_large_balanced = _timed_parse(unit * max(1, _SIZE_LARGE // len(unit)))
+        ratio_balanced = t_large_balanced / max(t_mid_balanced, 1e-9)
+        assert ratio_balanced < _AMORTIZED_K, (
+            f"HL-A: Polynomial growth (all-arms balanced family): "
+            f"t(large)/t(mid)={ratio_balanced:.1f} (expect <{_AMORTIZED_K}). "
+            f"t_mid={t_mid_balanced:.6f}s, t_large={t_large_balanced:.6f}s"
         )
-        assert t_large < _REDOS_BUDGET_SECONDS, (
-            f"HL-A: Absolute ceiling exceeded: {t_large:.3f}s >= {_REDOS_BUDGET_SECONDS}s"
+        assert t_large_balanced < _REDOS_BUDGET_SECONDS, (
+            f"HL-A: Absolute ceiling exceeded (balanced): {t_large_balanced:.3f}s"
         )
+
+        # Unterminated-token family (no-close backtick tokens, 10-char each):
+        # "`aaaaaaaaaa " repeated N times.  Each token is 12 chars (< 1900 limit).
+        # The shipped [^`]+? arm rejects quickly (no close backtick).
+        # The ratio over 10x sizes confirms linear scaling for the shipped regex.
+        unit_bt = "`" + "a" * 10 + " "  # 12 chars: open backtick + 10 chars + space
+        t_mid_bt = _timed_parse(unit_bt * max(1, _SIZE_MID // len(unit_bt)))
+        t_large_bt = _timed_parse(unit_bt * max(1, _SIZE_LARGE // len(unit_bt)))
+        ratio_bt = t_large_bt / max(t_mid_bt, 1e-9)
+        assert ratio_bt < _AMORTIZED_K, (
+            f"HL-A: Polynomial growth (unterminated backtick short-token family): "
+            f"t(large)/t(mid)={ratio_bt:.1f} (expect <{_AMORTIZED_K}). "
+            f"t_mid={t_mid_bt:.6f}s, t_large={t_large_bt:.6f}s"
+        )
+        assert t_large_bt < _REDOS_BUDGET_SECONDS, (
+            f"HL-A: Absolute ceiling exceeded (unterminated backtick short-tokens): "
+            f"{t_large_bt:.3f}s"
+        )
+
+    def test_unterminated_run_absolute_ceiling(self) -> None:
+        """HL-A / HL-redos (rev2): long no-close token is handled within the budget.
+
+        This test is the REAL catastrophic-arm regression detector.
+
+        Corpus: a SINGLE 100-char open-backtick token ("`" + "a"*99, 100 chars
+        whitespace-free -- well within the 1900-char OversizedContentError limit).
+        The shipped ``[^`]+?`` arm rejects it in O(100) steps (no close backtick).
+
+        FALSIFIABILITY (verified by Hostile HL-3 / HL-redos spec): if ``[^`]+?``
+        were replaced with the nested-quantifier form ``(?:.+)+?`` (the catastrophic
+        mutant confirmed exponential by the hostile evaluator), this test FAILS:
+        n=100 chars → O(2^100) backtracking steps → timeout well within 5 s budget.
+        For reference: n=25 → ~1s, n=28 → ~8s (hostile-confirmed empirics).
+
+        The shipped anchored regex (``[^`]+?``) passes instantly because the negated
+        character class [^`] cannot match a backtick, so the engine terminates without
+        backtracking when it reaches the end of the 100-char token.
+        """
+        # Single 100-char no-close backtick token (no spaces needed -- it's <1900 chars)
+        probe = "`" + "a" * 99  # 100 chars, no closing backtick
+        result = _parse_within_budget(probe, budget=_REDOS_BUDGET_SECONDS)
+        assert isinstance(result, list)
+
+        # Also check multiple 100-char tokens (space-separated to stay in one paragraph)
+        probe_multi = (" `" + "a" * 99) * 5  # 5 × 100-char tokens, space-separated
+        result2 = _parse_within_budget(probe_multi, budget=_REDOS_BUDGET_SECONDS)
+        assert isinstance(result2, list)

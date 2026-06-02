@@ -97,19 +97,20 @@ def test_fuzz_publish_terminates_no_recursion(blocks: list[dict[str, Any]]) -> N
 
 @given(blocks=_block_tree_strategy)
 def test_fuzz_publish_no_real_network(blocks: list[dict[str, Any]]) -> None:
-    """AC-9: FakeClient records all calls; no real network is reached."""
-    client = FakeClient()
-    from unittest.mock import patch
+    """AC-9: FakeClient records all calls; no real network is reached.
 
-    with patch("httpx.get", side_effect=AssertionError("SSRF: httpx.get called in fuzz")):
-        try:
-            publish_block_tree(client, "fuzz-parent-002", blocks)
-        except RecursionError:
-            return  # tolerated for deeply recursive edge case in fuzz generation
-        except Exception as exc:
-            # Only AssertionError (SSRF guard) is a hard failure
-            if "SSRF" in str(exc):
-                pytest.fail(f"Fuzz triggered real network call: {exc}")
+    HL-theater fix (rev2): removed the vestigial ``httpx.get`` patch (notion_ops
+    never calls ``httpx.get`` directly, so patching it was unfalsifiable theater
+    per HL-C's premise).  The autouse ``_block_network`` fixture in conftest.py is
+    the real guard -- it blocks ``httpx.BaseTransport.handle_request`` and
+    ``socket.socket.connect``, raising ``NetworkBlockedError`` on any real
+    outbound connection.  This test no longer swallows exceptions broadly;
+    ``NetworkBlockedError`` (and any unexpected exception) propagates as a
+    hard test failure.
+    """
+    client = FakeClient()
+    # No httpx.get patch needed -- the autouse _block_network fixture is the real guard.
+    publish_block_tree(client, "fuzz-parent-002", blocks)
 
     # All calls recorded by FakeClient have expected shape
     for call in client.calls:

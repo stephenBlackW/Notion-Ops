@@ -108,9 +108,10 @@ class TestSSRFNoFetch:
     def test_extract_notion_id_makes_no_network_calls(self) -> None:
         """extract_notion_id is pure string parsing: zero network calls for any input.
 
-        The autouse _block_network fixture would raise NetworkBlockedError if
-        extract_notion_id attempted any socket or httpx connection. The function is
-        SSRF-safe by construction (pure string parsing; no urlopen/requests/httpx import).
+        The autouse _block_network fixture raises NetworkBlockedError on any real
+        socket/httpx connection. NetworkBlockedError is a RuntimeError subclass, so
+        we catch only ValueError (the expected error for invalid IDs) and let any
+        NetworkBlockedError propagate — making the guard genuinely falsifiable.
         """
         from notion_ops.utils.ids import extract_notion_id
         # SSRF-shaped URLs that could trigger a fetch in a naïve implementation
@@ -121,11 +122,13 @@ class TestSSRFNoFetch:
         ]
         for inp in ssrf_inputs:
             try:
-                # May raise ValueError for invalid IDs -- that is fine
+                # May raise ValueError for invalid IDs -- that is the only
+                # expected exception; NetworkBlockedError must NOT be caught here.
                 extract_notion_id(inp)
-            except (ValueError, Exception):
+            except ValueError:
                 pass
-            # If we reach here without NetworkBlockedError, no fetch occurred
+            # NetworkBlockedError (RuntimeError) is NOT caught -- it propagates,
+            # failing the test. If we reach here, no network call was attempted.
 
     def test_blocks_image_ssrf_url_verbatim(self) -> None:
         """Blocks.image() embeds the SSRF URL verbatim without fetching it."""
