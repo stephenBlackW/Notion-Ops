@@ -9,8 +9,7 @@ the PRNG seed so results are reproducible across identical runs.
 """
 from __future__ import annotations
 
-import pytest
-from hypothesis import HealthCheck, settings
+from hypothesis import settings
 
 
 def test_ci_profile_registered() -> None:

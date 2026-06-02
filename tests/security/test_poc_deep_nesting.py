@@ -343,7 +343,7 @@ class TestCountRequestsRecursionGuard:
 
     def test_count_requests_equivalence_flat_plan(self) -> None:
         """count_requests returns the same total as a reference counting loop on flat plans."""
-        from notion_ops.utils.publish import AppendRequest, Followup
+        from notion_ops.utils.publish import AppendRequest
 
         # A plan with no followups: count = number of requests.
         plan = [AppendRequest(payload=[{"type": "paragraph", "paragraph": {}}]) for _ in range(50)]

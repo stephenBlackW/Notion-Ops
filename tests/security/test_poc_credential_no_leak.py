@@ -23,7 +23,6 @@ if AuthenticationError were to format the token into the message, this test FAIL
 """
 from __future__ import annotations
 
-import os
 
 import pytest
 
