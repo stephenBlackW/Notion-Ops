@@ -28,9 +28,8 @@ Multiple inner reps amortize JIT/GC variance.
 """
 from __future__ import annotations
 
+import multiprocessing
 import time
-
-import pytest
 
 from notion_ops.utils.markdown import markdown_to_blocks
 
@@ -50,16 +49,52 @@ _SIZE_MID = 2000
 _SIZE_LARGE = 20000
 
 
+def _redos_worker(text: str, q: multiprocessing.Queue) -> None:
+    """Child-process entry: parse ``text`` and put the outcome on the queue."""
+    try:
+        q.put(("ok", markdown_to_blocks(text)))
+    except BaseException as exc:  # noqa: BLE001 - surface any error to the parent
+        q.put(("err", repr(exc)))
+
+
 def _parse_within_budget(text: str, budget: float = _REDOS_BUDGET_SECONDS) -> list:
-    """Parse text and assert it completes within budget seconds."""
+    """Parse ``text`` in a KILLABLE subprocess; fail fast if it exceeds ``budget``.
+
+    The prior implementation ran ``markdown_to_blocks(text)`` in-process and only
+    checked the elapsed time *after* it returned. Against a catastrophic-backtracking
+    regression the call never returns, so the budget assertion is never reached and
+    the test session hangs indefinitely -- a ReDoS turned into a CI-hang DoS, and the
+    exact reason this guard could not actually enforce its claimed "absolute ceiling."
+
+    Running in a child process with ``join(budget)`` + ``terminate()`` makes the guard
+    genuinely bound the runaway computation: a catastrophic regression FAILS at the
+    budget (subprocess killed) instead of hanging. The shipped anchored ``[^`]+?`` arm
+    completes in microseconds, so this adds negligible overhead on the green path.
+    """
+    ctx = multiprocessing.get_context("fork")
+    q: multiprocessing.Queue = ctx.Queue()
+    proc = ctx.Process(target=_redos_worker, args=(text, q))
     start = time.perf_counter()
-    result = markdown_to_blocks(text)
+    proc.start()
+    proc.join(budget)
+    if proc.is_alive():
+        proc.terminate()
+        proc.join()
+        raise AssertionError(
+            f"markdown_to_blocks did not complete within {budget}s on adversarial "
+            f"input (len={len(text)}) -- possible ReDoS (subprocess killed at budget)"
+        )
     elapsed = time.perf_counter() - start
+    status, payload = q.get()
+    if status == "err":
+        raise AssertionError(
+            f"markdown_to_blocks raised on adversarial input (len={len(text)}): {payload}"
+        )
     assert elapsed < budget, (
         f"markdown_to_blocks took {elapsed:.3f}s on adversarial input "
         f"(budget: {budget}s) -- possible ReDoS"
     )
-    return result
+    return payload
 
 
 def _timed_parse(text: str, num_reps: int = 5) -> float:
