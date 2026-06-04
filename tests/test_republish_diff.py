@@ -26,6 +26,7 @@ from notion_ops.utils.ids import extract_notion_id
 from notion_ops.utils.publish import (
     _DEFAULT_ANNOTATIONS,  # imported (not redefined) so the fake's API-noise
     _children_of,          # mirror cannot drift from the production default set
+    _is_already_gone,
     _new_subtree_key,
     _without_children,
     RepublishResult,
@@ -397,13 +398,16 @@ class TestListingAndCounts:
                 inner.delete = delete  # type: ignore[method-assign]
 
         client = Gone404Client()
-        republish_block_tree(client, PAGE, [_para("new0")])  # must not raise
+        result = republish_block_tree(client, PAGE, [_para("new0")])  # must not raise
         bodies = [
             client._nodes[i]["paragraph"]["rich_text"][0]["text"]["content"]
             for i in client.top_ids
             if client._nodes[i].get("type") == "paragraph"
         ]
         assert bodies == ["new0"]
+        # A tolerated 404 is still counted in deleted_count (both old blocks are
+        # gone afterwards, one via the 404 no-op, one via a real delete).
+        assert result.deleted_count == 2
 
     def test_non_404_delete_error_propagates(self):
         """A non-404 delete error is NOT swallowed — it still aborts."""
@@ -461,6 +465,68 @@ class TestListingAndCounts:
         assert client.calls == 1                 # stopped, did not loop forever
         assert [b["id"] for b in blocks] == ["blk-0"]
         assert any("next_cursor" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# _is_already_gone — each 404 detection branch bound individually (Step-4 S1)
+# ---------------------------------------------------------------------------
+
+
+class TestIsAlreadyGone:
+    """Each detection layer is bound in isolation so a regression to any one of
+    them is caught (the integration 404 test sets status + code together, which
+    lets the .status branch short-circuit the others)."""
+
+    def test_status_404_branch(self):
+        err = RuntimeError("gone")
+        err.status = 404  # type: ignore[attr-defined]
+        assert _is_already_gone(err)
+
+    def test_code_enum_branch(self):
+        """notion-client APIResponseError.code is an APIErrorCode enum (.value)."""
+
+        class _Code:
+            value = "object_not_found"
+
+        err = RuntimeError("gone")
+        err.code = _Code()  # type: ignore[attr-defined]   # no .status set
+        assert _is_already_gone(err)
+
+    def test_code_str_branch(self):
+        err = RuntimeError("gone")
+        err.code = "object_not_found"  # type: ignore[attr-defined]
+        assert _is_already_gone(err)
+
+    def test_httpx_response_404_branch(self):
+        """httpx HTTPStatusError shape: .response.status_code, no .status/.code."""
+
+        class _Resp:
+            status_code = 404
+
+        err = RuntimeError("gone")
+        err.response = _Resp()  # type: ignore[attr-defined]
+        assert _is_already_gone(err)
+
+    def test_non_404_status_is_not_gone(self):
+        err = RuntimeError("server error")
+        err.status = 500  # type: ignore[attr-defined]
+        assert not _is_already_gone(err)
+
+    def test_other_code_is_not_gone(self):
+        err = RuntimeError("validation")
+        err.code = "validation_error"  # type: ignore[attr-defined]
+        assert not _is_already_gone(err)
+
+    def test_response_non_404_is_not_gone(self):
+        class _Resp:
+            status_code = 500
+
+        err = RuntimeError("server error")
+        err.response = _Resp()  # type: ignore[attr-defined]
+        assert not _is_already_gone(err)
+
+    def test_plain_exception_is_not_gone(self):
+        assert not _is_already_gone(RuntimeError("boom"))
 
 
 # ---------------------------------------------------------------------------
