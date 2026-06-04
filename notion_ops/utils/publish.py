@@ -743,14 +743,49 @@ def _common_prefix_len(
     return k
 
 
+def _is_already_gone(exc: Exception) -> bool:
+    """True if *exc* says the block is already archived/absent (HTTP 404 /
+    ``object_not_found``).
+
+    Deleting a block that is already gone is a no-op, not a failure — duck-typed
+    across the notion-client ``APIResponseError`` (``.status`` / ``.code``) and an
+    httpx ``HTTPStatusError`` (``.response.status_code``) so the publisher need not
+    import either error type.
+    """
+    if getattr(exc, "status", None) == 404:
+        return True
+    code = getattr(exc, "code", None)
+    if str(getattr(code, "value", code)) == "object_not_found":
+        return True
+    response = getattr(exc, "response", None)
+    if response is not None and getattr(response, "status_code", None) == 404:
+        return True
+    return False
+
+
 def _delete_block(client: Any, block_id: str) -> None:
-    """Archive (delete) a single block, retry-wrapped."""
+    """Archive (delete) a single block, retry-wrapped.
+
+    A 404 (already archived / absent) is tolerated as a no-op (nops-cycle-1-HL-3):
+    ``_should_retry`` covers only 429/503, so without this a non-transient 404 on
+    an already-archived block would abort the whole republish mid-clear. Any other
+    error still propagates.
+    """
 
     @retry_on_transient
     def _delete(bid: str) -> None:
         client.api.blocks.delete(block_id=bid)
 
-    _delete(block_id)
+    try:
+        _delete(block_id)
+    except Exception as exc:
+        if _is_already_gone(exc):
+            logger.debug(
+                "Block %s already archived/absent on delete; treating as no-op.",
+                block_id,
+            )
+            return
+        raise
 
 
 def republish_block_tree(

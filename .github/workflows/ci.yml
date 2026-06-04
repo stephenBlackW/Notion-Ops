@@ -66,22 +66,33 @@ jobs:
   # --- nops-security-A: scanners-first (deterministic security foundation) ---
   # ruff S (flake8-bandit) is enforced by the `lint` job via pyproject
   # [tool.ruff.lint] extend-select. These two jobs add dependency-vuln + secret
-  # scanning. pip-audit is advisory to start (same precedent as the mypy job):
-  # it audits the runner's installed closure, which can flag upstream advisories
-  # the project cannot directly fix. Flip to blocking once the closure is clean.
+  # scanning. pip-audit is now BLOCKING (nops-housekeeping-B / HL-securityA-1):
+  # the rev1 advisory posture existed because the naive `pip-audit` audits the
+  # runner's WHOLE installed closure — pip-audit's own tooling deps and the
+  # runner's build tools (pip/setuptools/wheel) — which can flag upstream
+  # advisories notion-ops cannot directly fix. We removed that blocker by
+  # scoping the audit to notion-ops's OWN frozen dependency closure
+  # (`pip freeze --exclude-editable`, captured BEFORE pip-audit is installed)
+  # and running pip-audit isolated via `pipx run` so its deps never enter the
+  # audited set. That closure was verified vuln-free, so the gate now blocks.
+  # If a real advisory ever lands in a shipped dependency, CI fails (correct);
+  # accept a specific unfixable advisory with `pipx run pip-audit ... --ignore-vuln <ID>`
+  # plus an inline rationale.
   pip-audit:
     name: pip-audit (deps)
     runs-on: ubuntu-latest
-    continue-on-error: true   # advisory; flip to blocking when the closure is clean (HL-securityA-1)
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -e "." pip-audit
-      # Audit only the project's own dependency closure (skip the package itself,
-      # which is not on PyPI yet, and the runner's build tooling).
-      - run: pip-audit --skip-editable --desc
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e "."
+      # Freeze ONLY notion-ops's runtime closure (no editable self, no pip-audit
+      # tooling, no build tools), then audit exactly that set with an isolated
+      # pip-audit so the gate reflects what notion-ops ships — nothing else.
+      - run: pip freeze --exclude-editable > /tmp/nops-closure.txt
+      - run: pipx run pip-audit -r /tmp/nops-closure.txt --desc
 
   secret-scan:
     name: gitleaks (secrets)

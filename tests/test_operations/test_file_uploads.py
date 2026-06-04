@@ -527,6 +527,34 @@ class TestAsyncFileUploads:
         assert upload_id == "a-2"
         assert post.await_count == 2
 
+    async def test_async_upload_file_reads_off_event_loop(
+        self, async_file_uploads, tmp_path
+    ):
+        """The blocking Path.read_bytes() must be dispatched via asyncio.to_thread
+        so a large multi-part read does not block the event loop
+        (nops-refactor-A-HL-1)."""
+        import asyncio
+        from unittest.mock import AsyncMock
+
+        png = tmp_path / "fig.png"
+        png.write_bytes(b"\x89PNGdata")
+        create_resp = _make_response(
+            200, json_body={"id": "a-9", "upload_url": "https://files.notion.com/a/9"}
+        )
+        send_resp = _make_response(200, json_body={"id": "a-9", "status": "uploaded"})
+        patcher, _post = _async_post_patch(side_effect=[create_resp, send_resp])
+
+        spy = AsyncMock(side_effect=asyncio.to_thread)
+        with patcher, patch(
+            "notion_ops.operations.file_uploads.asyncio.to_thread", spy
+        ):
+            await async_file_uploads.upload_file(png)
+
+        spy.assert_awaited_once()
+        # The dispatched callable reads the file's bytes off-thread.
+        dispatched = spy.await_args.args[0]
+        assert dispatched() == b"\x89PNGdata"
+
     async def test_async_create_maps_typed_error(self, async_file_uploads):
         resp = _make_response(404, text="missing")
         patcher, _ = _async_post_patch(return_value=resp)

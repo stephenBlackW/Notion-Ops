@@ -371,6 +371,59 @@ class TestListingAndCounts:
         assert result.request_count == 0
         assert client.top_ids == []
 
+    def test_404_on_delete_does_not_abort(self):
+        """An already-archived block (404 on delete) is a no-op, not an abort
+        (nops-cycle-1-HL-3). The republish must still complete with the new
+        content."""
+
+        class Gone404Client(ContentFakeClient):
+            def __init__(self) -> None:
+                super().__init__(initial=[_para("old0"), _para("old1")])
+                self._first = True
+                inner = self.api.blocks
+                real_delete = inner.delete
+
+                def delete(*, block_id: str) -> None:
+                    if self._first:
+                        self._first = False
+                        # Already archived: the block is gone; the API 404s.
+                        super(Gone404Client, self)._remove(block_id)
+                        err = RuntimeError("object_not_found")
+                        err.status = 404  # type: ignore[attr-defined]
+                        err.code = "object_not_found"  # type: ignore[attr-defined]
+                        raise err
+                    real_delete(block_id=block_id)
+
+                inner.delete = delete  # type: ignore[method-assign]
+
+        client = Gone404Client()
+        republish_block_tree(client, PAGE, [_para("new0")])  # must not raise
+        bodies = [
+            client._nodes[i]["paragraph"]["rich_text"][0]["text"]["content"]
+            for i in client.top_ids
+            if client._nodes[i].get("type") == "paragraph"
+        ]
+        assert bodies == ["new0"]
+
+    def test_non_404_delete_error_propagates(self):
+        """A non-404 delete error is NOT swallowed — it still aborts."""
+
+        class Err500Client(ContentFakeClient):
+            def __init__(self) -> None:
+                super().__init__(initial=[_para("old0")])
+                inner = self.api.blocks
+
+                def delete(*, block_id: str) -> None:
+                    err = RuntimeError("internal error")
+                    err.status = 500  # type: ignore[attr-defined]
+                    raise err
+
+                inner.delete = delete  # type: ignore[method-assign]
+
+        client = Err500Client()
+        with pytest.raises(RuntimeError):
+            republish_block_tree(client, PAGE, [_para("new0")])
+
     def test_warns_and_stops_on_has_more_without_cursor(self, caplog):
         """A server contract violation (has_more=True, next_cursor=None) must warn
         and stop — a conservative truncation (under-delete, never over-delete),
