@@ -25,6 +25,7 @@ batched up to the 100-block and payload-size caps.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from collections import deque
@@ -579,6 +580,12 @@ def _list_children_blocks(client: Any, block_id: str) -> list[dict[str, Any]]:
             break
         cursor = response.get("next_cursor")
         if not cursor:
+            logger.warning(
+                "blocks.children.list reported has_more=True but returned no "
+                "next_cursor for %s; stopping pagination. The child listing may "
+                "be truncated.",
+                block_id,
+            )
             break
     return blocks
 
@@ -654,11 +661,21 @@ def _norm_body(body: dict[str, Any]) -> dict[str, Any]:
 
 
 def _content_key(block: dict[str, Any], child_keys: list[str]) -> str:
-    """A canonical, id-free content key for *block* given its children's keys."""
+    """A canonical, id-free content key for *block* given its children's keys.
+
+    The key is a fixed-size sha256 **digest**, not the raw JSON. Each child's key
+    is already a digest, so the JSON serialized at this level is O(own content +
+    number of children) — never the full descendant subtree. Digesting at every
+    level keeps total work O(tree size); embedding raw child JSON instead would
+    re-escape every descendant key at every level (O(2^depth) — an OOM on deeply
+    nested pages reachable via the public API). Equality is preserved: identical
+    content yields identical digests at every level.
+    """
     btype = block.get("type", "")
     body = block.get(btype)
     norm = _norm_body(body) if isinstance(body, dict) else {}
-    return json.dumps([btype, norm, child_keys], sort_keys=True, default=str)
+    raw = json.dumps([btype, norm, child_keys], sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def _subtree_key(root: dict[str, Any], get_children: Any) -> str:
@@ -755,7 +772,10 @@ def republish_block_tree(
 
     - **Identical content ⇒ zero writes.** If the page's current top-level
       subtrees hash equal to *blocks*, no append or delete is made and the
-      existing block ids (and their comments) are preserved.
+      existing block ids (and their comments) are preserved. (Detecting this
+      trades writes for reads: the diff lists the existing top level and fetches
+      the subtrees of the matched prefix, so a no-op republish still makes O(n)
+      read calls — but zero writes.)
     - **Unchanged leading blocks keep their ids.** The longest common prefix of
       unchanged top-level blocks is left in place; only the divergent suffix is
       rewritten. Interior edits rewrite the divergent suffix (a full mid-list,

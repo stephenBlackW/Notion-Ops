@@ -24,22 +24,15 @@ import pytest
 
 from notion_ops.utils.ids import extract_notion_id
 from notion_ops.utils.publish import (
-    RepublishResult,
-    _children_of,
+    _DEFAULT_ANNOTATIONS,  # imported (not redefined) so the fake's API-noise
+    _children_of,          # mirror cannot drift from the production default set
+    _new_subtree_key,
     _without_children,
+    RepublishResult,
     republish_block_tree,
 )
 
 PAGE = "11111111-1111-1111-1111-111111111111"
-
-_DEFAULT_ANNOTATIONS = {
-    "bold": False,
-    "italic": False,
-    "strikethrough": False,
-    "underline": False,
-    "code": False,
-    "color": "default",
-}
 
 
 def _para(text: str) -> dict[str, Any]:
@@ -377,6 +370,88 @@ class TestListingAndCounts:
         assert result.deleted_count == 2
         assert result.request_count == 0
         assert client.top_ids == []
+
+
+# ---------------------------------------------------------------------------
+# Robustness — content key stays bounded under deep nesting (Step-4 B1)
+# ---------------------------------------------------------------------------
+
+
+class TestContentKeyBounded:
+    def test_subtree_key_size_constant_under_depth(self):
+        """The content key is a fixed-size digest, not a nested-escaped string.
+
+        Pre-fix, ``_content_key`` embedded each child's raw JSON key, so the key
+        grew ~32x per 5 levels (depth-20 ≈ 14 MB) and OOM-killed the process on a
+        deep page reachable via the public API. The digest makes every level's
+        key 64 hex chars regardless of depth.
+        """
+
+        def chain(depth: int) -> dict[str, Any]:
+            block: dict[str, Any] = _para("leaf")
+            for i in range(depth):
+                block = _toggle(f"t{i}", [block])
+            return block
+
+        k10 = _new_subtree_key(chain(10))
+        k40 = _new_subtree_key(chain(40))
+        assert len(k10) == 64
+        assert len(k40) == 64           # constant size — no exponential blowup
+
+    def test_deep_page_republish_is_noop_without_blowup(self):
+        """A depth-30 page republished identically is a no-op and does not OOM."""
+        block: dict[str, Any] = _para("leaf")
+        for i in range(30):
+            block = _toggle(f"t{i}", [block])
+        client = ContentFakeClient(initial=[block])
+        result = republish_block_tree(client, PAGE, copy.deepcopy([block]))
+        assert result.request_count == 0
+        assert client.ops == []
+
+
+# ---------------------------------------------------------------------------
+# Convergence — a re-run after an interrupted republish prunes the stale tail
+# ---------------------------------------------------------------------------
+
+
+class TestConvergenceAfterInterrupt:
+    def test_rerun_after_interrupted_delete_converges(self):
+        """Atomicity's other half: interruption leaves a non-empty page that a
+        clean re-run converges to exactly the requested content (no permanent
+        duplication). This is the AC-3 'convergent on re-run' promise."""
+
+        class FlakyOnceDelete(ContentFakeClient):
+            def __init__(self) -> None:
+                super().__init__(initial=[_para("old0"), _para("old1")])
+                self._raised = False
+                inner = self.api.blocks
+                real_delete = inner.delete
+
+                def once(*, block_id: str) -> None:
+                    if not self._raised:
+                        self._raised = True
+                        raise RuntimeError("interrupted mid-clear")
+                    real_delete(block_id=block_id)
+
+                inner.delete = once  # type: ignore[method-assign]
+
+        client = FlakyOnceDelete()
+        new = [_para("new0")]
+
+        # Run 1: appends new0, then raises on the first delete — page now holds
+        # [old0, old1, new0] (non-empty, includes the new content).
+        with pytest.raises(RuntimeError):
+            republish_block_tree(client, PAGE, copy.deepcopy(new))
+        assert client.top_ids  # never empty
+
+        # Run 2 (clean): converges to exactly [new0].
+        republish_block_tree(client, PAGE, copy.deepcopy(new))
+        bodies = [
+            client._nodes[i]["paragraph"]["rich_text"][0]["text"]["content"]
+            for i in client.top_ids
+            if client._nodes[i].get("type") == "paragraph"
+        ]
+        assert bodies == ["new0"]
 
     def test_list_and_delete_are_retry_wrapped(self, monkeypatch):
         """A single transient 503 on list + delete is absorbed (retry_on_transient)."""
