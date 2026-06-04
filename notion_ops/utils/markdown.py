@@ -430,7 +430,10 @@ def markdown_to_blocks(markdown: str) -> list[dict[str, Any]]:
         notion.blocks.append(page_id, blocks)
     """
     lines = markdown.split('\n')
-    blocks: list[dict[str, Any]] = []
+    # Mixed by construction: most builders yield Block objects, but
+    # _parse_details_block yields an already-API-format dict. The return
+    # normalizes both to dicts.
+    blocks: list[Block | dict[str, Any]] = []
     current_text: list[str] = []
     in_code_block = False
     code_content: list[str] = []
@@ -646,7 +649,8 @@ def markdown_to_blocks(markdown: str) -> list[dict[str, Any]]:
     if in_code_block:
         flush_code()
 
-    # Convert Block objects to API format
+    # Convert Block objects to API format; dict entries (e.g. from
+    # _parse_details_block) are already API-format and pass through.
     return [b.to_api_format() if isinstance(b, Block) else b for b in blocks]
 
 

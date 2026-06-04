@@ -51,7 +51,12 @@ jobs:
   typecheck:
     name: mypy
     runs-on: ubuntu-latest
-    continue-on-error: true   # TODO: drop after ao-cycle-1 closes PUB-07 (47 union-narrowing errors in operations/{blocks,data_sources}.py + client.py:204 known)
+    # BLOCKING (PUB-07 resolved 2026-06-04): the 45 default-config errors
+    # (notion-client SyncAsync union-narrowing in operations/* + client.py; the
+    # markdown list[Block|dict] annotation; the DataSource schema constructor)
+    # are fixed — see notion_ops/utils/responses.py::sync_dict + the typed
+    # annotations. `mypy notion_ops` is clean, so the gate now blocks.
+    # (Full `--strict` remains a future enhancement, not enabled here.)
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -59,8 +64,6 @@ jobs:
           python-version: "3.12"
       - run: |
           pip install -e ".[dev]"
-      # NOTE: not --strict yet; PUB-07 strict cleanup deferred to ao-cycle-1.
-      # Job is continue-on-error until those known errors are resolved.
       - run: mypy notion_ops
 
   # --- nops-security-A: scanners-first (deterministic security foundation) ---

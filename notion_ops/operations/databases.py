@@ -5,10 +5,11 @@ from typing import TYPE_CHECKING, Any, Literal
 from notion_client import APIResponseError
 
 from notion_ops.exceptions import map_api_error
-from notion_ops.models.database import Database, DataSource
+from notion_ops.models.database import Database, DataSource, DataSourceSchema
 from notion_ops.models.properties import PropertyDefinition
 from notion_ops.utils.ids import extract_notion_id
 from notion_ops.utils.retry import retry_on_transient, retry_on_transient_async
+from notion_ops.utils.responses import sync_dict
 
 if TYPE_CHECKING:
     from notion_ops.client import AsyncNotionOps, NotionOps
@@ -100,6 +101,7 @@ class DatabaseOperations:
 
         try:
             response = self._client.api.databases.create(**create_data)
+            response = sync_dict(response)
             return Database.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(
@@ -121,6 +123,7 @@ class DatabaseOperations:
 
         try:
             response = self._client.api.databases.retrieve(database_id=database_id)
+            response = sync_dict(response)
             return Database.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(
@@ -184,6 +187,7 @@ class DatabaseOperations:
                 database_id=database_id,
                 **update_data,
             )
+            response = sync_dict(response)
             return Database.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(
@@ -213,7 +217,7 @@ class DatabaseOperations:
                 database_id=db.id,
                 title=db.title,
                 description=db.description,
-                schema={"properties": {}},
+                schema=DataSourceSchema(properties={}),
                 created_time=db.created_time,
                 last_edited_time=db.last_edited_time,
                 parent=db.parent,
@@ -242,6 +246,7 @@ class DatabaseOperations:
                 database_id=database_id,
                 archived=True,
             )
+            response = sync_dict(response)
             return Database.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(
@@ -429,7 +434,7 @@ class AsyncDatabaseOperations:
                 database_id=db.id,
                 title=db.title,
                 description=db.description,
-                schema={"properties": {}},
+                schema=DataSourceSchema(properties={}),
                 created_time=db.created_time,
                 last_edited_time=db.last_edited_time,
                 parent=db.parent,

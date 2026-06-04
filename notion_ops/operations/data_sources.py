@@ -11,6 +11,7 @@ from notion_ops.models.page import Page
 from notion_ops.models.properties import PropertyDefinition
 from notion_ops.utils.ids import extract_notion_id
 from notion_ops.utils.retry import retry_on_transient, retry_on_transient_async
+from notion_ops.utils.responses import sync_dict
 
 if TYPE_CHECKING:
     from notion_ops.client import AsyncNotionOps, NotionOps
@@ -40,6 +41,7 @@ class DataSourceOperations:
         try:
             # Use database retrieve endpoint (data source ID == database ID in most cases)
             response = self._client.api.databases.retrieve(database_id=data_source_id)
+            response = sync_dict(response)
             return DataSource.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(
@@ -105,6 +107,7 @@ class DataSourceOperations:
                 method="POST",
                 body=body,
             )
+            response = sync_dict(response)
             return QueryResult.from_api_response(response, Page)
         except APIResponseError as e:
             raise map_api_error(
@@ -195,6 +198,7 @@ class DataSourceOperations:
                 database_id=data_source_id,
                 **update_data,
             )
+            response = sync_dict(response)
             return DataSource.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(
@@ -220,6 +224,7 @@ class DataSourceOperations:
                 database_id=data_source_id,
                 properties={property_name: None},
             )
+            response = sync_dict(response)
             return DataSource.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(
