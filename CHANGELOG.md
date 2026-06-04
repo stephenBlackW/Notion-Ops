@@ -6,12 +6,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.1.0] — 2026-06-02
+
+First public **PyPI** release of `notion-ops`, carved out of AgenticOS into the
+standalone `stephenBlackW/Notion-Ops` repository (the repo was created
+2026-05-27; this is the first release published to PyPI).
+
 ### Added
+- High-level CRUD operations for pages, databases, data sources, blocks,
+  users, and file uploads, with sync (`NotionOps`) and async
+  (`AsyncNotionOps`) clients.
+- Type-safe Pydantic v2 models for Notion objects.
+- Fluent `Filter` / `Sort` query builders and `Blocks` block builders.
+- Markdown → Notion blocks conversion (`markdown_to_blocks`).
+- `publish_block_tree` / `publish_markdown`: a limit-aware publishing
+  orchestrator that respects Notion's nesting, 100-children, and table-row
+  caps automatically. Exported at top level (in `__all__`) alongside
+  `PublishResult`.
 - **Idempotent republish (ISS-012):** `republish_block_tree` / `republish_markdown`
   (+ `RepublishResult`) clear a page's existing top-level children, then publish the
   new tree — so re-running converges to the same content instead of duplicating it
   (Notion has no native "replace children"). Content is idempotent; block ids are not
-  stable (cleared blocks are archived + recreated). Promoted to top-level exports.
+  stable (cleared blocks are archived + recreated).
 - **Partial-publish observability (HL-patchA-1):** `PublishResult` gains `partial`
   and `skipped_followups`, set when a deferred nested append can't resolve its parent
   id — callers can branch on `partial` instead of scraping logs.
@@ -19,12 +37,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   + `retry_on_transient_async`). `AsyncNotionOps.file_uploads` now exposes it, so
   `await client.file_uploads.upload_file(...)` no longer blocks the event loop on
   a synchronous multipart POST (audit F3).
-- Promoted the limit-aware publisher to top-level exports: `publish_block_tree`,
-  `publish_markdown`, and `PublishResult` are now importable from `notion_ops`
-  (and listed in `__all__`).
-
-- `CHANGELOG.md` (this file).
-- Packaging metadata: author email and an explicit README content type.
+- Retry/backoff on transient (429/503) errors.
+- **Security hardening (pre-publish red-team campaign):** a `tests/security/`
+  regression suite — ReDoS (amortized + catastrophic-arm), deep-recursion,
+  SSRF no-fetch (real-transport block), credential no-leak, and oversized-content
+  guards, plus a bounded deterministic `hypothesis` fuzz layer — wired as a
+  required CI gate for the release. The campaign found and fixed **ISS-019**: a
+  `RecursionError` denial-of-service in the publish planner on deep block trees,
+  resolved by fully de-recursing the planner (`_height`, `_total_blocks`,
+  `_max_children_count`, `_plan_append`, `execute_plan`, `count_requests` — now
+  all iterative; no `sys.getrecursionlimit()` ceiling remains).
 
 ### Changed
 - `FileUploads.create`/`send` now raise the same typed `NotionOpsError`
@@ -36,26 +58,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   an ad-hoc flat batcher (ISS-017), so templated bodies respect Notion's
   2-level inline-nesting limit and >100-row table splitting. Minor observable
   note: the body is appended under the page's *normalized* (dashless) id.
-- Version is now single-sourced from `notion_ops/__init__.py::__version__`
-  (hatchling dynamic version); `pyproject.toml` no longer duplicates it.
-- Raised the `notion-client` dependency floor to `>=2.4.0` — the data-sources
-  line. notion-ops defaults `Notion-Version` to `2025-09-03` and uses the
-  SDK's `data_sources` namespace; the prior `>=2.3.0` floor predated it. The
-  contract is now enforced by `tests/test_api_currency.py`.
-
-## [0.1.0] — 2026-05-27
-
-Initial public release, carved out of AgenticOS into the standalone
-`stephenBlackW/Notion-Ops` repository.
-
-### Added
-- High-level CRUD operations for pages, databases, data sources, blocks,
-  users, and file uploads, with sync (`NotionOps`) and async
-  (`AsyncNotionOps`) clients.
-- Type-safe Pydantic v2 models for Notion objects.
-- Fluent `Filter` / `Sort` query builders and `Blocks` block builders.
-- Markdown -> Notion blocks conversion (`markdown_to_blocks`).
-- `publish_block_tree` / `publish_markdown`: a limit-aware publishing
-  orchestrator that respects Notion's nesting, 100-children, and table-row
-  caps automatically.
-- Retry/backoff on transient (429/503) errors.
+- Version is single-sourced from `notion_ops/__init__.py::__version__`
+  (hatchling dynamic version).
+- The `notion-client` dependency floor is `>=2.4.0` — the data-sources line.
+  notion-ops defaults `Notion-Version` to `2025-09-03` and uses the SDK's
+  `data_sources` namespace; the prior `>=2.3.0` floor predated it. The contract
+  is enforced by `tests/test_api_currency.py`.
+- License metadata uses the SPDX `license = "MIT"` expression (PEP 639) with no
+  redundant `License ::` classifier.
