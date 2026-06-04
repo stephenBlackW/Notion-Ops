@@ -371,6 +371,44 @@ class TestListingAndCounts:
         assert result.request_count == 0
         assert client.top_ids == []
 
+    def test_warns_and_stops_on_has_more_without_cursor(self, caplog):
+        """A server contract violation (has_more=True, next_cursor=None) must warn
+        and stop — a conservative truncation (under-delete, never over-delete),
+        not a silent one and not an infinite loop."""
+        import logging
+
+        from notion_ops.utils.publish import _list_children_blocks
+
+        class BadCursorClient:
+            def __init__(self) -> None:
+                self.calls = 0
+                client = self
+
+                class _Children:
+                    def list(self, *, block_id, page_size=100, start_cursor=None):
+                        client.calls += 1
+                        return {
+                            "results": [{"id": "blk-0"}],
+                            "has_more": True,        # claims more...
+                            "next_cursor": None,     # ...but gives no cursor
+                        }
+
+                class _Blocks:
+                    children = _Children()
+
+                class _API:
+                    blocks = _Blocks()
+
+                self.api = _API()
+
+        client = BadCursorClient()
+        with caplog.at_level(logging.WARNING, logger="notion_ops.utils.publish"):
+            blocks = _list_children_blocks(client, "page-x")
+
+        assert client.calls == 1                 # stopped, did not loop forever
+        assert [b["id"] for b in blocks] == ["blk-0"]
+        assert any("next_cursor" in r.message for r in caplog.records)
+
 
 # ---------------------------------------------------------------------------
 # Robustness — content key stays bounded under deep nesting (Step-4 B1)
@@ -416,9 +454,11 @@ class TestContentKeyBounded:
 
 class TestConvergenceAfterInterrupt:
     def test_rerun_after_interrupted_delete_converges(self):
-        """Atomicity's other half: interruption leaves a non-empty page that a
-        clean re-run converges to exactly the requested content (no permanent
-        duplication). This is the AC-3 'convergent on re-run' promise."""
+        """Binds the AC-3 'convergent on re-run' promise: after an interrupted
+        republish, a clean re-run converges to exactly the requested content with
+        no permanent duplication (it prunes the stale tail, including the run-1
+        duplicate). This test binds the re-run *pruning*, not the append-before
+        -delete *ordering* — the ordering is bound by ``TestAtomicOrdering``."""
 
         class FlakyOnceDelete(ContentFakeClient):
             def __init__(self) -> None:
