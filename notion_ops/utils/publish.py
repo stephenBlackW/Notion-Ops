@@ -780,14 +780,12 @@ def republish_block_tree(
     old_suffix_ids = existing_ids[prefix_len:]
     new_suffix = blocks[prefix_len:]
 
-    # No-op fast path: the page already holds exactly this content.
-    if prefix_len == len(existing) == len(blocks):
-        return RepublishResult(
-            request_count=0,
-            top_level_block_ids=existing_ids,
-            deleted_count=0,
-        )
-
+    # Identical content falls through here with empty suffixes: nothing is
+    # published and nothing is deleted, and every existing id is kept in the
+    # prefix — i.e. zero writes, no special-case needed. (A no-op early return
+    # was removed after mutation testing proved it redundant: deleting it broke
+    # no test because this general path already delivers the zero-write result.)
+    #
     # Publish-before-delete: land the new suffix first (appends at the end),
     # then archive the old suffix. The page is never empty mid-operation.
     if new_suffix:
