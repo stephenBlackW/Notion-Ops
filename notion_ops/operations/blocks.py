@@ -9,6 +9,7 @@ from notion_ops.exceptions import map_api_error
 from notion_ops.models.block import Block
 from notion_ops.utils.ids import extract_notion_id
 from notion_ops.utils.retry import retry_on_transient, retry_on_transient_async
+from notion_ops.utils.responses import sync_dict
 
 if TYPE_CHECKING:
     from notion_ops.client import AsyncNotionOps, NotionOps
@@ -47,6 +48,7 @@ class BlockOperations:
 
         try:
             response = self._client.api.blocks.retrieve(block_id=block_id)
+            response = sync_dict(response)
             return Block.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="Block", resource_id=block_id) from e
@@ -90,6 +92,7 @@ class BlockOperations:
                     params["start_cursor"] = start_cursor
 
                 response = self._client.api.blocks.children.list(**params)
+                response = sync_dict(response)
 
                 for block_data in response.get("results", []):
                     block = Block.from_api_response(block_data)
@@ -160,6 +163,7 @@ class BlockOperations:
                 params["after"] = extract_notion_id(after)
 
             response = self._client.api.blocks.children.append(**params)
+            response = sync_dict(response)
 
             return [Block.from_api_response(b) for b in response.get("results", [])]
 
@@ -201,6 +205,7 @@ class BlockOperations:
                 block_id=block_id,
                 **update_data,
             )
+            response = sync_dict(response)
             return Block.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="Block", resource_id=block_id) from e
@@ -238,6 +243,7 @@ class BlockOperations:
                 block_id=block_id,
                 archived=True,
             )
+            response = sync_dict(response)
             return Block.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="Block", resource_id=block_id) from e
@@ -278,6 +284,7 @@ class BlockOperations:
 
             try:
                 response = self._client.api.blocks.children.list(**params)
+                response = sync_dict(response)
             except APIResponseError as e:
                 raise map_api_error(
                     e, resource_type="Block", resource_id=parent_id
@@ -318,6 +325,7 @@ class BlockOperations:
             response = self._client.api.blocks.children.list(
                 block_id=info.id, page_size=min(max_blocks, 100)
             )
+            response = sync_dict(response)
         except Exception as e:
             info.plain_text = f"[error reading content: {e}]"
             return info

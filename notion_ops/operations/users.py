@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from notion_ops.exceptions import map_api_error
 from notion_ops.utils.retry import retry_on_transient, retry_on_transient_async
+from notion_ops.utils.responses import sync_dict
 
 if TYPE_CHECKING:
     from notion_ops.client import AsyncNotionOps, NotionOps
@@ -55,6 +56,7 @@ class UserOperations:
         """
         try:
             response = self._client.api.users.retrieve(user_id=user_id)
+            response = sync_dict(response)
             return User.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="User", resource_id=user_id) from e
@@ -80,6 +82,7 @@ class UserOperations:
                     params["start_cursor"] = start_cursor
 
                 response = self._client.api.users.list(**params)
+                response = sync_dict(response)
 
                 for user_data in response.get("results", []):
                     users.append(User.from_api_response(user_data))
@@ -104,6 +107,7 @@ class UserOperations:
         """
         try:
             response = self._client.api.users.me()
+            response = sync_dict(response)
             return User.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="User") from e

@@ -25,6 +25,8 @@ batched up to the 100-block and payload-size caps.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from collections import deque
 from dataclasses import dataclass, field
@@ -550,46 +552,240 @@ class RepublishResult(PublishResult):
     deleted_count: int = 0
 
 
-def _existing_top_level_ids(client: Any, parent_id: str) -> list[str]:
-    """List the ids of the top-level child blocks currently under *parent_id*.
+def _list_children_blocks(client: Any, block_id: str) -> list[dict[str, Any]]:
+    """List the full top-level child block dicts currently under *block_id*.
 
     Paginated and retry-wrapped, matching :func:`execute_plan`'s use of the raw
     SDK (``client.api``) so the publisher stays decoupled from the operations
-    layer.
+    layer. Returns the API block dicts (id + type + body + ``has_children``),
+    which the minimal-write diff needs to compare existing content.
     """
 
     @retry_on_transient
-    def _list(block_id: str, cursor: str | None) -> dict[str, Any]:
-        params: dict[str, Any] = {"block_id": block_id, "page_size": 100}
+    def _list(bid: str, cursor: str | None) -> dict[str, Any]:
+        params: dict[str, Any] = {"block_id": bid, "page_size": 100}
         if cursor:
             params["start_cursor"] = cursor
         result = client.api.blocks.children.list(**params)
         return result if isinstance(result, dict) else {}
 
-    ids: list[str] = []
+    blocks: list[dict[str, Any]] = []
     cursor: str | None = None
     while True:
-        response = _list(parent_id, cursor)
+        response = _list(block_id, cursor)
         for block in response.get("results", []) or []:
-            bid = block.get("id")
-            if bid:
-                ids.append(bid)
+            if block.get("id"):
+                blocks.append(block)
         if not response.get("has_more"):
             break
         cursor = response.get("next_cursor")
         if not cursor:
+            logger.warning(
+                "blocks.children.list reported has_more=True but returned no "
+                "next_cursor for %s; stopping pagination. The child listing may "
+                "be truncated.",
+                block_id,
+            )
             break
-    return ids
+    return blocks
+
+
+# ---------------------------------------------------------------------------
+# Content hashing for the minimal-write republish diff (nops-cycle-2)
+# ---------------------------------------------------------------------------
+
+# Annotation flags at their Notion defaults carry no rendered meaning. The API
+# returns the full set on every span; ``markdown_to_blocks`` emits only the
+# non-default ones. Normalizing both to "non-default flags only" lets an
+# API-returned block and a freshly-converted block hash equal when their content
+# is the same. Dropping these can never make two *differently-rendered* blocks
+# collide (a default flag renders identically to its absence), so the diff stays
+# correctness-conservative: it may miss an optimization, never preserve a block
+# whose content changed.
+_DEFAULT_ANNOTATIONS: dict[str, Any] = {
+    "bold": False,
+    "italic": False,
+    "strikethrough": False,
+    "underline": False,
+    "code": False,
+    "color": "default",
+}
+
+
+def _norm_rich_text(rich_text: Any) -> list[Any]:
+    """Canonicalize a ``rich_text`` array to content-only triples.
+
+    Each span becomes ``[content, link, non_default_annotations]``. ``content``
+    prefers ``text.content`` (what the converter emits) and falls back to
+    ``plain_text`` (what the API returns); ``link`` unifies ``text.link.url`` and
+    the API's ``href``; annotations keep only non-default flags.
+    """
+    out: list[Any] = []
+    for span in rich_text or []:
+        if not isinstance(span, dict):
+            out.append(span)
+            continue
+        raw_text = span.get("text")
+        text = raw_text if isinstance(raw_text, dict) else {}
+        content = text.get("content")
+        if content is None:
+            content = span.get("plain_text", "")
+        link = text.get("link")
+        if isinstance(link, dict):
+            link = link.get("url")
+        if link is None:
+            link = span.get("href")
+        ann = span.get("annotations") or {}
+        non_default = sorted(
+            (k, v) for k, v in ann.items() if _DEFAULT_ANNOTATIONS.get(k) != v
+        )
+        out.append([content, link or None, non_default])
+    return out
+
+
+def _norm_body(body: dict[str, Any]) -> dict[str, Any]:
+    """Canonicalize a block's type-body: drop children + render-neutral defaults."""
+    out: dict[str, Any] = {}
+    for key, value in body.items():
+        if key == "children":
+            continue
+        if key == "rich_text":
+            out[key] = _norm_rich_text(value)
+        elif key == "color" and value == "default":
+            continue
+        elif key == "is_toggleable" and value is False:
+            continue
+        else:
+            out[key] = value
+    return out
+
+
+def _content_key(block: dict[str, Any], child_keys: list[str]) -> str:
+    """A canonical, id-free content key for *block* given its children's keys.
+
+    The key is a fixed-size sha256 **digest**, not the raw JSON. Each child's key
+    is already a digest, so the JSON serialized at this level is O(own content +
+    number of children) — never the full descendant subtree. Digesting at every
+    level keeps total work O(tree size); embedding raw child JSON instead would
+    re-escape every descendant key at every level (O(2^depth) — an OOM on deeply
+    nested pages reachable via the public API). Equality is preserved: identical
+    content yields identical digests at every level.
+    """
+    btype = block.get("type", "")
+    body = block.get(btype)
+    norm = _norm_body(body) if isinstance(body, dict) else {}
+    raw = json.dumps([btype, norm, child_keys], sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _subtree_key(root: dict[str, Any], get_children: Any) -> str:
+    """Content key for *root*'s whole subtree, computed iteratively.
+
+    ``get_children(block)`` yields a block's child list (inline for new blocks;
+    a live API fetch for existing ones). Iterative post-order (explicit stack)
+    so a deep linear-chain page cannot raise ``RecursionError`` — consistent with
+    the ISS-019 de-recursion of the publish planner.
+    """
+    keys: dict[int, str] = {}
+    # Each frame: (node, next_child_index, children, accumulated_child_keys).
+    stack: list[tuple[dict[str, Any], int, list[dict[str, Any]], list[str]]] = [
+        (root, 0, list(get_children(root)), [])
+    ]
+    while stack:
+        node, idx, children, acc = stack[-1]
+        if idx < len(children):
+            child = children[idx]
+            stack[-1] = (node, idx + 1, children, acc)
+            stack.append((child, 0, list(get_children(child)), []))
+        else:
+            key = _content_key(node, acc)
+            keys[id(node)] = key
+            stack.pop()
+            if stack:
+                stack[-1][3].append(key)
+    return keys[id(root)]
+
+
+def _new_subtree_key(block: dict[str, Any]) -> str:
+    """Content key for a new (inline-children) block subtree."""
+    return _subtree_key(block, _children_of)
+
+
+def _existing_subtree_key(client: Any, block: dict[str, Any]) -> str:
+    """Content key for an existing block subtree, fetching children on demand."""
+
+    def _children(node: dict[str, Any]) -> list[dict[str, Any]]:
+        if node.get("has_children") and node.get("id"):
+            return _list_children_blocks(client, node["id"])
+        return []
+
+    return _subtree_key(block, _children)
+
+
+def _common_prefix_len(
+    client: Any,
+    existing: list[dict[str, Any]],
+    new_blocks: list[dict[str, Any]],
+) -> int:
+    """Length of the leading run of top-level blocks with identical content.
+
+    Compares existing (API) blocks against new (converted) blocks by content key,
+    stopping at the first divergence. Only the matched existing blocks have their
+    child subtrees fetched (bounded work)."""
+    k = 0
+    limit = min(len(existing), len(new_blocks))
+    while k < limit:
+        if _existing_subtree_key(client, existing[k]) != _new_subtree_key(
+            new_blocks[k]
+        ):
+            break
+        k += 1
+    return k
+
+
+def _is_already_gone(exc: Exception) -> bool:
+    """True if *exc* says the block is already archived/absent (HTTP 404 /
+    ``object_not_found``).
+
+    Deleting a block that is already gone is a no-op, not a failure — duck-typed
+    across the notion-client ``APIResponseError`` (``.status`` / ``.code``) and an
+    httpx ``HTTPStatusError`` (``.response.status_code``) so the publisher need not
+    import either error type.
+    """
+    if getattr(exc, "status", None) == 404:
+        return True
+    code = getattr(exc, "code", None)
+    if str(getattr(code, "value", code)) == "object_not_found":
+        return True
+    response = getattr(exc, "response", None)
+    if response is not None and getattr(response, "status_code", None) == 404:
+        return True
+    return False
 
 
 def _delete_block(client: Any, block_id: str) -> None:
-    """Archive (delete) a single block, retry-wrapped."""
+    """Archive (delete) a single block, retry-wrapped.
+
+    A 404 (already archived / absent) is tolerated as a no-op (nops-cycle-1-HL-3):
+    ``_should_retry`` covers only 429/503, so without this a non-transient 404 on
+    an already-archived block would abort the whole republish mid-clear. Any other
+    error still propagates.
+    """
 
     @retry_on_transient
     def _delete(bid: str) -> None:
         client.api.blocks.delete(block_id=bid)
 
-    _delete(block_id)
+    try:
+        _delete(block_id)
+    except Exception as exc:
+        if _is_already_gone(exc):
+            logger.debug(
+                "Block %s already archived/absent on delete; treating as no-op.",
+                block_id,
+            )
+            return
+        raise
 
 
 def republish_block_tree(
@@ -598,40 +794,69 @@ def republish_block_tree(
     blocks: list[dict[str, Any]],
     **kwargs: Any,
 ) -> RepublishResult:
-    """Idempotently (re)publish *blocks* under *parent_id*.
+    """Idempotently (re)publish *blocks* under *parent_id* with a minimal-write diff.
 
     Unlike :func:`publish_block_tree`, which always **appends** (so calling it
-    twice duplicates content), this clears the existing top-level children under
-    *parent_id* first, then publishes the new tree. Running it repeatedly with
-    the same input converges to the same page content — exactly what a re-run of
-    an atom/report publish needs (Notion has no native "replace children" op).
+    twice duplicates content), this converges *parent_id*'s top-level children to
+    *blocks*. Running it repeatedly with the same input converges to the same page
+    content — exactly what a re-run of an atom/report publish needs (Notion has no
+    native "replace children" op).
 
-    Contract: the *content* is idempotent (no accumulation across runs); block
-    **ids are not stable** — cleared blocks are archived and recreated, not
-    diffed in place. A minimal-write content diff is a future optimization
-    (HL-cycle1-1); this is the robust, limit-aware keep-in-sync primitive.
+    **Minimal-write (nops-cycle-2, closes nops-cycle-1-HL-1).** A content diff
+    avoids rewriting blocks that have not changed:
 
-    **Not atomic:** the clear and the republish are separate request batches. If
-    the process is interrupted (or a non-transient error such as a 4xx on a
-    delete aborts the clear), the page can be left empty or partially cleared —
-    a re-run converges it again, but there is no transactional rollback. Notion
-    exposes no multi-block transaction, so callers needing all-or-nothing must
-    wrap this themselves.
+    - **Identical content ⇒ zero writes.** If the page's current top-level
+      subtrees hash equal to *blocks*, no append or delete is made and the
+      existing block ids (and their comments) are preserved. (Detecting this
+      trades writes for reads: the diff lists the existing top level and fetches
+      the subtrees of the matched prefix, so a no-op republish still makes O(n)
+      read calls — but zero writes.)
+    - **Unchanged leading blocks keep their ids.** The longest common prefix of
+      unchanged top-level blocks is left in place; only the divergent suffix is
+      rewritten. Interior edits rewrite the divergent suffix (a full mid-list,
+      id-stable LCS diff is a future optimization — routed forward).
+
+    **Atomic-safe ordering (closes nops-cycle-1-HL-2).** The new suffix is
+    appended **before** any old block is deleted (publish-before-delete). An
+    interruption between the two phases therefore leaves the page with valid
+    content (the kept prefix and/or the freshly published suffix) — never the
+    empty page that the v0.1.0 clear-first order could leave. A re-run converges.
+    (Notion still exposes no multi-block transaction, so a duplicate suffix can
+    linger after an interruption until the next republish prunes it.)
 
     ``**kwargs`` are forwarded to :func:`publish_block_tree` (the limit knobs).
     """
     parent = extract_notion_id(parent_id)
-    existing = _existing_top_level_ids(client, parent)
-    for block_id in existing:
+    existing = _list_children_blocks(client, parent)
+    existing_ids = [b["id"] for b in existing]
+
+    prefix_len = _common_prefix_len(client, existing, blocks)
+    prefix_ids = existing_ids[:prefix_len]
+    old_suffix_ids = existing_ids[prefix_len:]
+    new_suffix = blocks[prefix_len:]
+
+    # Identical content falls through here with empty suffixes: nothing is
+    # published and nothing is deleted, and every existing id is kept in the
+    # prefix — i.e. zero writes, no special-case needed. (A no-op early return
+    # was removed after mutation testing proved it redundant: deleting it broke
+    # no test because this general path already delivers the zero-write result.)
+    #
+    # Publish-before-delete: land the new suffix first (appends at the end),
+    # then archive the old suffix. The page is never empty mid-operation.
+    if new_suffix:
+        published = publish_block_tree(client, parent, new_suffix, **kwargs)
+    else:
+        published = PublishResult(request_count=0, top_level_block_ids=[])
+
+    for block_id in old_suffix_ids:
         _delete_block(client, block_id)
 
-    published = publish_block_tree(client, parent, blocks, **kwargs)
     return RepublishResult(
         request_count=published.request_count,
-        top_level_block_ids=published.top_level_block_ids,
+        top_level_block_ids=prefix_ids + published.top_level_block_ids,
         partial=published.partial,
         skipped_followups=published.skipped_followups,
-        deleted_count=len(existing),
+        deleted_count=len(old_suffix_ids),
     )
 
 

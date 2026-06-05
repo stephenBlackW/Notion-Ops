@@ -16,6 +16,7 @@ single-part helpers are sufficient.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import mimetypes
 from pathlib import Path
@@ -502,7 +503,9 @@ class AsyncFileUploads:
             raise FileNotFoundError(f"File not found: {p}")
 
         ctype = content_type or _infer_content_type(p)
-        file_bytes = p.read_bytes()
+        # Read off the event loop: a synchronous Path.read_bytes() would block all
+        # other coroutines while a large multi-part upload is read (nops-refactor-A-HL-1).
+        file_bytes = await asyncio.to_thread(p.read_bytes)
 
         created = await self.create(filename=p.name, content_type=ctype)
         upload_id = created.get("id")

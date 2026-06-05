@@ -13,6 +13,7 @@ from notion_ops.operations.databases import AsyncDatabaseOperations, DatabaseOpe
 from notion_ops.operations.file_uploads import AsyncFileUploads, FileUploads
 from notion_ops.operations.pages import AsyncPageOperations, PageOperations
 from notion_ops.operations.users import AsyncUserOperations, UserOperations
+from notion_ops.utils.responses import sync_dict
 
 
 class NotionOps:
@@ -137,6 +138,7 @@ class NotionOps:
             params["start_cursor"] = start_cursor
 
         response = self.api.search(**params)
+        response = sync_dict(response)
 
         # Convert results to Page objects (filter out non-page results like databases)
         pages = []

@@ -10,6 +10,7 @@ from notion_ops.models.page import Page, PageCreate, PageUpdate
 from notion_ops.models.properties import PropertyValue
 from notion_ops.utils.ids import extract_notion_id
 from notion_ops.utils.retry import retry_on_transient, retry_on_transient_async
+from notion_ops.utils.responses import sync_dict
 
 if TYPE_CHECKING:
     from notion_ops.client import AsyncNotionOps, NotionOps
@@ -70,6 +71,7 @@ class PageOperations:
 
         try:
             response = self._client.api.pages.create(**page_create.to_api_format())
+            response = sync_dict(response)
             return Page.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="Page", resource_id=parent_id) from e
@@ -94,6 +96,7 @@ class PageOperations:
 
         try:
             response = self._client.api.pages.retrieve(page_id=page_id)
+            response = sync_dict(response)
             return Page.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="Page", resource_id=page_id) from e
@@ -149,6 +152,7 @@ class PageOperations:
                 page_id=page_id,
                 **update_data,
             )
+            response = sync_dict(response)
             return Page.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="Page", resource_id=page_id) from e
@@ -227,6 +231,7 @@ class PageOperations:
                     parent_key: parent_id_clean,
                 },
             )
+            response = sync_dict(response)
             return Page.from_api_response(response)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="Page", resource_id=page_id) from e
@@ -250,6 +255,7 @@ class PageOperations:
                 page_id=page_id,
                 property_id=property_id,
             )
+            response = sync_dict(response)
             return response
         except APIResponseError as e:
             raise map_api_error(e, resource_type="Page", resource_id=page_id) from e
