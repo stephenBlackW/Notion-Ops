@@ -23,6 +23,8 @@ from typing import Any
 import pytest
 
 from notion_ops.utils.ids import extract_notion_id
+
+from tests.conftest import NoCommentsEndpoint
 from notion_ops.utils.publish import (
     _DEFAULT_ANNOTATIONS,  # imported (not redefined) so the fake's API-noise
     _children_of,          # mirror cannot drift from the production default set
@@ -121,6 +123,7 @@ class ContentFakeClient:
 
         class _API:
             blocks = _Blocks()
+            comments = NoCommentsEndpoint()
 
         self.api = _API()
         if initial:

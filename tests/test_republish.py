@@ -11,6 +11,8 @@ from __future__ import annotations
 from typing import Any
 
 from notion_ops.utils.ids import extract_notion_id
+
+from tests.conftest import NoCommentsEndpoint
 from notion_ops.utils.publish import (
     PublishResult,
     RepublishResult,
@@ -98,6 +100,7 @@ class StatefulFakeClient:
 
         class _API:
             blocks = _Blocks()
+            comments = NoCommentsEndpoint()
 
         self.api = _API()
 
@@ -207,6 +210,7 @@ class TestRepublishPagination:
 
                 class _API:
                     blocks = _Blocks()
+                    comments = NoCommentsEndpoint()
 
                 self.api = _API()
 
@@ -244,6 +248,7 @@ class DroppingClient:
 
         class _API:
             blocks = _Blocks()
+            comments = NoCommentsEndpoint()
 
         self.api = _API()
 

@@ -1,5 +1,7 @@
 """Shared pytest fixtures for Notion Operations tests."""
 
+from typing import Any
+
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -8,6 +10,20 @@ from notion_client import APIResponseError
 from notion_client.errors import APIErrorCode
 
 from notion_ops.client import AsyncNotionOps, NotionOps
+
+
+class NoCommentsEndpoint:
+    """A ``comments`` endpoint for a fixture page that carries no discussion.
+
+    The nops-cycle-3 republish guard asks the Comments API before it makes any
+    destructive write, so a fake that models ``blocks`` has to model ``comments``
+    too — otherwise it has stopped modelling the SDK the code under test calls,
+    and the missing attribute would be mistaken for a defect in the guard.
+    Fixtures that need a *discussed* page subclass this or supply their own.
+    """
+
+    def list(self, **params: Any) -> dict[str, Any]:
+        return {"results": [], "has_more": False, "next_cursor": None}
 
 
 @pytest.fixture
