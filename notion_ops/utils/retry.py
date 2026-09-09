@@ -19,6 +19,10 @@ MAX_ATTEMPTS = 4
 BASE_DELAY = 2.0  # seconds
 MAX_DELAY = 16.0  # seconds
 
+#: HTTP statuses worth another attempt: rate limiting, plus the 5xx family Notion
+#: returns when a request never reached a healthy backend.
+_TRANSIENT_STATUSES = frozenset({429, 500, 502, 503, 504})
+
 
 def _should_retry(exception: Exception) -> bool:
     """
@@ -75,6 +79,87 @@ def _get_retry_delay(attempt: int, exception: Exception) -> float:
     return float(min(delay, MAX_DELAY))
 
 
+
+
+def is_transient_api_error(exception: BaseException) -> bool:
+    """True when *exception* carries an HTTP status worth another attempt.
+
+    :func:`_should_retry` cannot answer this for the SDK's ``APIResponseError``:
+    it is not an ``HTTPStatusError``, it is not a :class:`RateLimitError`, and a
+    Notion 503 body reads ``"Notion is unavailable."`` — no digits, so the
+    substring fallback misses it too. The status code is on the error object, so
+    that is what this reads (nops-cycle-3 rev2, contract-5).
+    """
+    status = getattr(exception, "status", None)
+    return isinstance(status, int) and status in _TRANSIENT_STATUSES
+
+
+def _plan_retry(
+    exception: Exception,
+    attempt: int,
+    predicate: Callable[[Exception], bool],
+    name: str,
+) -> float | None:
+    """Seconds to wait before the next attempt, or ``None`` meaning re-raise."""
+    if not predicate(exception):
+        return None
+    if attempt >= MAX_ATTEMPTS - 1:
+        logger.warning(
+            f"Max retry attempts ({MAX_ATTEMPTS}) reached for {name}. "
+            f"Last error: {exception}"
+        )
+        return None
+    delay = _get_retry_delay(attempt, exception)
+    logger.info(
+        f"Transient error in {name} (attempt {attempt + 1}/{MAX_ATTEMPTS}): "
+        f"{type(exception).__name__}: {exception}. Retrying in {delay:.1f}s..."
+    )
+    return delay
+
+
+def _decorate_sync(
+    func: Callable[..., T],
+    predicate: Callable[[Exception], bool],
+) -> Callable[..., T]:
+    """*func* retried while *predicate* says the failure was transient."""
+
+    @functools.wraps(func)
+    def wrapper(*args: Any, **kwargs: Any) -> T:
+        for attempt in range(MAX_ATTEMPTS):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                delay = _plan_retry(e, attempt, predicate, func.__name__)
+                if delay is None:
+                    raise
+                time.sleep(delay)
+        raise RuntimeError(f"Unexpected retry state in {func.__name__}")
+
+    return cast(Callable[..., T], wrapper)
+
+
+def _decorate_async(
+    func: Callable[..., Any],
+    predicate: Callable[[Exception], bool],
+) -> Callable[..., Any]:
+    """Async twin of :func:`_decorate_sync`."""
+    import asyncio
+
+    @functools.wraps(func)
+    async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        for attempt in range(MAX_ATTEMPTS):
+            try:
+                return await func(*args, **kwargs)
+            except Exception as e:
+                delay = _plan_retry(e, attempt, predicate, func.__name__)
+                if delay is None:
+                    raise
+                await asyncio.sleep(delay)
+        raise RuntimeError(f"Unexpected retry state in {func.__name__}")
+
+    return wrapper
+
+
 def retry_on_transient(func: Callable[..., T]) -> Callable[..., T]:
     """
     Decorator that retries a function on transient Notion API errors.
@@ -90,6 +175,12 @@ def retry_on_transient(func: Callable[..., T]) -> Callable[..., T]:
     - Logs retry attempts at INFO level
     - Re-raises original exception after exhausting retries
 
+    The wrapped function is expected to raise ``httpx``/library-typed errors:
+    the retry decision goes through :func:`_should_retry`, which recognises an
+    ``HTTPStatusError``, a :class:`RateLimitError`, or a status-bearing message.
+    A function that maps the SDK's ``APIResponseError`` to a library type *before*
+    it escapes needs :func:`retry_on_transient_api` instead — see that function.
+
     Args:
         func: The function to wrap with retry logic
 
@@ -104,43 +195,7 @@ def retry_on_transient(func: Callable[..., T]) -> Callable[..., T]:
         # Will automatically retry on 503 or 429 errors
         page = create_page(notion_client, page_data)
     """
-
-    @functools.wraps(func)
-    def wrapper(*args: Any, **kwargs: Any) -> T:
-        last_exception: Exception | None = None
-
-        for attempt in range(MAX_ATTEMPTS):
-            try:
-                return func(*args, **kwargs)
-            except Exception as e:
-                last_exception = e
-
-                # Check if we should retry this error
-                if not _should_retry(e):
-                    raise
-
-                # Check if we have attempts remaining
-                if attempt >= MAX_ATTEMPTS - 1:
-                    logger.warning(
-                        f"Max retry attempts ({MAX_ATTEMPTS}) reached for {func.__name__}. "
-                        f"Last error: {e}"
-                    )
-                    raise
-
-                # Calculate delay and retry
-                delay = _get_retry_delay(attempt, e)
-                logger.info(
-                    f"Transient error in {func.__name__} (attempt {attempt + 1}/{MAX_ATTEMPTS}): "
-                    f"{type(e).__name__}: {e}. Retrying in {delay:.1f}s..."
-                )
-                time.sleep(delay)
-
-        # This should never be reached, but for type safety
-        if last_exception:
-            raise last_exception
-        raise RuntimeError(f"Unexpected retry state in {func.__name__}")
-
-    return cast(Callable[..., T], wrapper)
+    return _decorate_sync(func, _should_retry)
 
 
 def retry_on_transient_async(func: Callable[..., Any]) -> Callable[..., Any]:
@@ -162,43 +217,31 @@ def retry_on_transient_async(func: Callable[..., Any]) -> Callable[..., Any]:
             return await client.pages.create(**data)
 
         # Will automatically retry on 503 or 429 errors
-        page = await create_page(async_notion_client, page_data)
+        page = create_page(async_notion_client, page_data)
     """
-    import asyncio
+    return _decorate_async(func, _should_retry)
 
-    @functools.wraps(func)
-    async def wrapper(*args: Any, **kwargs: Any) -> T:
-        last_exception: Exception | None = None
 
-        for attempt in range(MAX_ATTEMPTS):
-            try:
-                return await func(*args, **kwargs)
-            except Exception as e:
-                last_exception = e
+def retry_on_transient_api(func: Callable[..., T]) -> Callable[..., T]:
+    """Retry *func* on a **raw** SDK ``APIResponseError`` with a transient status.
 
-                # Check if we should retry this error
-                if not _should_retry(e):
-                    raise
+    Wrap the request itself with this and map the error one layer *out*, never
+    the other way around: a mapped 503 is a bare ``NotionOpsError`` carrying
+    Notion's body text, which :func:`_should_retry` cannot recognise, so mapping
+    inside the retry wrapper turns four attempts into one (contract-5, measured).
 
-                # Check if we have attempts remaining
-                if attempt >= MAX_ATTEMPTS - 1:
-                    logger.warning(
-                        f"Max retry attempts ({MAX_ATTEMPTS}) reached for {func.__name__}. "
-                        f"Last error: {e}"
-                    )
-                    raise
+    Example:
+        @retry_on_transient_api
+        def _raw(): return client.api.pages.retrieve(page_id=page_id)
 
-                # Calculate delay and retry
-                delay = _get_retry_delay(attempt, e)
-                logger.info(
-                    f"Transient error in {func.__name__} (attempt {attempt + 1}/{MAX_ATTEMPTS}): "
-                    f"{type(e).__name__}: {e}. Retrying in {delay:.1f}s..."
-                )
-                await asyncio.sleep(delay)
+        try:
+            return _raw()
+        except APIResponseError as e:
+            raise map_api_error(e, ...) from e
+    """
+    return _decorate_sync(func, is_transient_api_error)
 
-        # This should never be reached, but for type safety
-        if last_exception:
-            raise last_exception
-        raise RuntimeError(f"Unexpected retry state in {func.__name__}")
 
-    return cast(Callable[..., T], wrapper)
+def retry_on_transient_api_async(func: Callable[..., Any]) -> Callable[..., Any]:
+    """Async twin of :func:`retry_on_transient_api`."""
+    return _decorate_async(func, is_transient_api_error)

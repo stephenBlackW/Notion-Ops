@@ -28,6 +28,7 @@ from notion_client import APIResponseError
 from notion_client.errors import APIErrorCode
 
 from notion_ops.client import NotionOps
+from notion_ops.exceptions import NotionOpsError
 from notion_ops.exceptions import PermissionError as NotionPermissionError
 from notion_ops.operations.comments import (
     AsyncCommentOperations,
@@ -37,6 +38,7 @@ from notion_ops.operations.comments import (
     list_discussions_async,
 )
 from notion_ops.utils.ids import extract_notion_id
+from notion_ops.utils.retry import MAX_ATTEMPTS
 
 PAGE = "11111111-1111-1111-1111-111111111111"
 BLOCK = "22222222-2222-2222-2222-222222222222"
@@ -76,6 +78,17 @@ def _comment(
             }
         ],
     }
+
+
+def _service_unavailable() -> APIResponseError:
+    """A 503 exactly as Notion sends it: a coded error whose body has no digits."""
+    return APIResponseError(
+        code=APIErrorCode.ServiceUnavailable,
+        status=503,
+        message="Notion is unavailable.",
+        headers=None,
+        raw_body_text='{"object":"error","code":"service_unavailable"}',
+    )
 
 
 class CommentFakeClient:
@@ -189,14 +202,41 @@ class TestListDiscussions:
         client = CommentFakeClient([_envelope([])])
         assert list_discussions(client, PAGE) == []
 
-    def test_has_more_without_cursor_stops_rather_than_looping(self):
-        """A malformed envelope must terminate, not spin on the same cursor."""
+    def test_has_more_without_cursor_raises_rather_than_truncating(self):
+        """A malformed envelope must fail CLOSED, not report a partial listing.
+
+        Terminating the loop is right — re-requesting the same cursor forever is
+        not an option. Returning what was accumulated is not: the guard reads the
+        result as "these are all the open comments", and a truncated listing that
+        looks complete is how a discussed page gets its blocks deleted. So the
+        listing raises, and it does not spin (one call, not four).
+        """
         client = CommentFakeClient([_envelope([_comment("c-1", "a")], has_more=True)])
 
-        found = list_discussions(client, PAGE)
+        with pytest.raises(NotionOpsError, match="truncated"):
+            list_discussions(client, PAGE)
 
-        assert [d.id for d in found] == ["c-1"]
         assert len(client.calls) == 1
+
+    def test_a_truncated_empty_first_page_is_not_reported_as_no_discussion(self):
+        """hostile-5's exact scenario: the malformed page is the FIRST one.
+
+        ``{"results": [], "has_more": true, "next_cursor": null}`` accumulates
+        nothing, so a listing that returned what it had would hand the guard
+        ``[]`` — indistinguishable from a page nobody has commented on, on a page
+        that may carry a hundred threads.
+        """
+        client = CommentFakeClient([_envelope([], has_more=True)])
+
+        with pytest.raises(NotionOpsError):
+            list_discussions(client, PAGE)
+
+    def test_an_envelope_without_results_raises(self):
+        """No ``results`` key at all is unusable, not empty."""
+        client = CommentFakeClient([{"object": "list", "has_more": False}])
+
+        with pytest.raises(NotionOpsError, match="results"):
+            list_discussions(client, PAGE)
 
     def test_accepts_a_url_and_sends_the_bare_id(self):
         client = CommentFakeClient([_envelope([])])
@@ -252,15 +292,19 @@ class TestCommentOperations:
             ops_client.comments.list(PAGE)
 
     def test_transient_503_is_retried(self, ops_client):
-        """The listing is retry-wrapped like every other read in operations/."""
+        """The listing is retry-wrapped like every other read in operations/.
+
+        The fixture's message is Notion's **real** 503 body, which carries no
+        digits. The earlier version of this test said ``"503 Service
+        Unavailable"``, and that string is the only reason it passed: the error
+        was mapped to a bare ``NotionOpsError`` inside the retry wrapper, and the
+        retry predicate's substring fallback matched the message rather than the
+        status. Against a real 503 the listing made one attempt. What binds the
+        contract is the attempt count on a realistic error, so that is what this
+        asserts (nops-cycle-3 rev2, contract-5/6).
+        """
         ops_client.api.comments.list.side_effect = [
-            APIResponseError(
-                code=APIErrorCode.ServiceUnavailable,
-                status=503,
-                message="503 Service Unavailable",
-                headers=None,
-                raw_body_text='{"object":"error","code":"service_unavailable"}',
-            ),
+            _service_unavailable(),
             _envelope([_comment("c-1", "survived")]),
         ]
 
@@ -269,6 +313,20 @@ class TestCommentOperations:
 
         assert [d.plain_text for d in found] == ["survived"]
         assert ops_client.api.comments.list.call_count == 2
+
+    def test_a_persistent_503_is_attempted_four_times_then_surfaces(self, ops_client):
+        """The exhaustion path: MAX_ATTEMPTS tries, then the mapped error."""
+        ops_client.api.comments.list.side_effect = [_service_unavailable()] * 8
+
+        with patch("notion_ops.utils.retry.time.sleep") as slept:
+            with pytest.raises(NotionOpsError) as caught:
+                ops_client.comments.list(PAGE)
+
+        assert ops_client.api.comments.list.call_count == MAX_ATTEMPTS == 4
+        # 2s, 4s, 8s between the four attempts — the repo's standing backoff.
+        assert [call.args[0] for call in slept.call_args_list] == [2.0, 4.0, 8.0]
+        # Mapped on the way out, so the caller still sees a library type.
+        assert not isinstance(caught.value, APIResponseError)
 
 
 class TestAsyncCommentOperations:

@@ -28,10 +28,10 @@ from typing import TYPE_CHECKING, Any
 
 from notion_client import APIResponseError
 
-from notion_ops.exceptions import map_api_error
+from notion_ops.exceptions import NotionOpsError, map_api_error
 from notion_ops.utils.ids import extract_notion_id
 from notion_ops.utils.responses import sync_dict
-from notion_ops.utils.retry import retry_on_transient, retry_on_transient_async
+from notion_ops.utils.retry import retry_on_transient_api, retry_on_transient_api_async
 
 logger = logging.getLogger(__name__)
 
@@ -95,20 +95,32 @@ def _results_of(response: dict[str, Any]) -> list[dict[str, Any]]:
 def _next_cursor(response: dict[str, Any], block_id: str) -> str | None:
     """The cursor for the next page, or ``None`` when the listing is complete.
 
-    An envelope claiming ``has_more`` without a cursor is a malformed response;
-    stopping (loudly) beats re-requesting the same page forever, and matches
-    ``_list_children_blocks``'s handling of the same shape.
+    **Fails closed.** A malformed envelope — no ``results`` key at all, or
+    ``has_more`` with no cursor to follow it with — raises rather than returning
+    what was accumulated so far. Returning it would be indistinguishable from a
+    complete listing, and the caller that matters here is
+    :func:`~notion_ops.utils.publish._guard_destructive_republish`, which reads an
+    empty list as "nobody is talking about this page, go ahead and delete its
+    blocks". A truncated listing is *unknown*, not *empty*, and unknown is the one
+    answer this guard must never round down (nops-cycle-3 rev2, hostile-5).
     """
+    if "results" not in response:
+        raise NotionOpsError(
+            f"comments.list returned an envelope with no 'results' for {block_id}: "
+            f"the comment listing is unusable, and treating it as an empty listing "
+            f"would report an undiscussed page",
+            code="malformed_response",
+        )
     if not response.get("has_more"):
         return None
     cursor = response.get("next_cursor")
     if not cursor:
-        logger.warning(
-            "comments.list reported has_more=True but returned no next_cursor "
-            "for %s; stopping pagination. The comment listing may be truncated.",
-            block_id,
+        raise NotionOpsError(
+            f"comments.list reported has_more=True but returned no next_cursor for "
+            f"{block_id}: the comment listing is truncated, and what was read so "
+            f"far cannot be reported as the whole discussion",
+            code="malformed_response",
         )
-        return None
     return str(cursor)
 
 
@@ -122,11 +134,17 @@ def list_discussions(client: Any, block_id: str) -> list[Discussion]:
     """
     block = extract_notion_id(block_id)
 
-    @retry_on_transient
+    # The retry wrapper sits INSIDE the mapping, not outside it: a mapped 503 is a
+    # bare NotionOpsError carrying Notion's body text, which the retry predicate
+    # cannot recognise, so mapping first would spend one attempt where the repo
+    # rule asks for four (nops-cycle-3 rev2, contract-5).
+    @retry_on_transient_api
+    def _raw(cursor: str | None) -> dict[str, Any]:
+        return sync_dict(client.api.comments.list(**_list_params(block, cursor)))
+
     def _list(cursor: str | None) -> dict[str, Any]:
-        params = _list_params(block, cursor)
         try:
-            return sync_dict(client.api.comments.list(**params))
+            return _raw(cursor)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="Comment", resource_id=block) from e
 
@@ -144,14 +162,24 @@ async def list_discussions_async(client: Any, block_id: str) -> list[Discussion]
     """Async twin of :func:`list_discussions`."""
     block = extract_notion_id(block_id)
 
-    @retry_on_transient_async
+    @retry_on_transient_api_async
+    async def _raw(cursor: str | None) -> Any:
+        return await client.api.comments.list(**_list_params(block, cursor))
+
     async def _list(cursor: str | None) -> dict[str, Any]:
-        params = _list_params(block, cursor)
         try:
-            response = await client.api.comments.list(**params)
-            return response if isinstance(response, dict) else {}
+            response = await _raw(cursor)
         except APIResponseError as e:
             raise map_api_error(e, resource_type="Comment", resource_id=block) from e
+        if not isinstance(response, dict):
+            # The sync twin lets an unexpected shape explode at the first .get();
+            # substituting {} here would report "no discussion" instead (hostile-9).
+            raise NotionOpsError(
+                f"comments.list returned {type(response).__name__}, not an envelope, "
+                f"for {block}",
+                code="malformed_response",
+            )
+        return response
 
     found: list[Discussion] = []
     cursor: str | None = None
