@@ -19,6 +19,19 @@ MAX_ATTEMPTS = 4
 BASE_DELAY = 2.0  # seconds
 MAX_DELAY = 16.0  # seconds
 
+#: Ceiling on a wait the *server* asked for, as distinct from :data:`MAX_DELAY`,
+#: which bounds the blind exponential ladder. The two are separate on purpose. A
+#: ``Retry-After`` is information the ladder does not have, and contract-21
+#: measured what ignoring it costs: 2/4/8 against a server asking for 30 is four
+#: rejected attempts and a failure in the middle of a revision. But honouring a
+#: header is not agreeing to block indefinitely — a header of ``3600`` produced
+#: three hour-long ``time.sleep`` calls inside one call, against a docstring
+#: promising 16s. So it is honoured in full up to a minute, which is longer than
+#: any interval Notion's rate limiter actually asks for and shorter than any wait
+#: a synchronous library call should impose without saying so
+#: (nops-cycle-3 rev6, hostile-45).
+MAX_RETRY_AFTER = 60.0  # seconds
+
 #: HTTP statuses worth another attempt: rate limiting, plus the 5xx family Notion
 #: returns when a request never reached a healthy backend.
 _TRANSIENT_STATUSES = frozenset({429, 500, 502, 503, 504})
@@ -49,6 +62,18 @@ def _should_retry(exception: Exception) -> bool:
     return "503" in error_msg or "429" in error_msg or "rate limit" in error_msg
 
 
+def _server_specified(seconds: float) -> float:
+    """A wait the server asked for, floored at :data:`BASE_DELAY` and ceilinged at
+    :data:`MAX_RETRY_AFTER`.
+
+    Both bounds are on the same helper so all three sources of a ``Retry-After`` —
+    a mapped :class:`RateLimitError`, an ``httpx.HTTPStatusError``, and a raw
+    status-bearing SDK error — get the same answer, which is how the ceiling came
+    to be missing in the first place (nops-cycle-3 rev6, hostile-45).
+    """
+    return float(min(max(seconds, BASE_DELAY), MAX_RETRY_AFTER))
+
+
 def _get_retry_delay(attempt: int, exception: Exception) -> float:
     """
     Calculate retry delay with exponential backoff.
@@ -62,15 +87,14 @@ def _get_retry_delay(attempt: int, exception: Exception) -> float:
     """
     # For rate limit errors, try to extract retry_after if available
     if isinstance(exception, RateLimitError):
-        return float(max(exception.retry_after, BASE_DELAY))
+        return _server_specified(exception.retry_after)
 
     if isinstance(exception, HTTPStatusError) and exception.response.status_code == 429:
         # Check for Retry-After header
         retry_after = exception.response.headers.get("Retry-After")
         if retry_after:
             try:
-                parsed_delay = float(retry_after)
-                return float(max(parsed_delay, BASE_DELAY))
+                return _server_specified(float(retry_after))
             except ValueError:
                 pass
 
@@ -85,7 +109,7 @@ def _get_retry_delay(attempt: int, exception: Exception) -> float:
         raw = headers.get("Retry-After") if headers is not None else None
         if raw:
             try:
-                return float(max(float(raw), BASE_DELAY))
+                return _server_specified(float(raw))
             except (TypeError, ValueError):
                 pass
 
@@ -185,8 +209,12 @@ def retry_on_transient(func: Callable[..., T]) -> Callable[..., T]:
 
     Retry behavior:
     - Maximum 4 attempts (3 retries after initial attempt)
-    - Exponential backoff: 2s, 4s, 8s, capped at 16s
-    - For rate limits, respects Retry-After header if present
+    - Exponential backoff: 2s, 4s, 8s, capped at ``MAX_DELAY`` (16s)
+    - For rate limits, honours ``Retry-After`` in full where it is longer than
+      the ladder would have waited, floored at ``BASE_DELAY`` and capped at
+      ``MAX_RETRY_AFTER`` (60s) — a separate, larger ceiling, because a header is
+      information the ladder does not have and a header is also not a licence to
+      block the caller for an hour (nops-cycle-3, contract-21 + hostile-45)
     - Logs retry attempts at INFO level
     - Re-raises original exception after exhausting retries
 
@@ -248,7 +276,9 @@ def retry_on_transient_api(func: Callable[..., T]) -> Callable[..., T]:
     A 429 handled this way still waits the interval the server asked for:
     :func:`_get_retry_delay` reads ``Retry-After`` off the raw SDK error's own
     ``.headers``, not only off the mapped :class:`RateLimitError` the old order
-    produced (contract-21).
+    produced (contract-21). That wait is bounded by :data:`MAX_RETRY_AFTER`
+    rather than by :data:`MAX_DELAY` — honoured in full, but not past a minute
+    (hostile-45).
 
     Example:
         @retry_on_transient_api

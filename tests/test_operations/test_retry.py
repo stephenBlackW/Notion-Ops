@@ -10,6 +10,8 @@ from notion_client.errors import APIErrorCode
 from notion_ops.exceptions import RateLimitError
 from notion_ops.utils.retry import (
     MAX_ATTEMPTS,
+    MAX_DELAY,
+    MAX_RETRY_AFTER,
     _get_retry_delay,
     _should_retry,
     retry_on_transient,
@@ -176,6 +178,47 @@ class TestRawSdkRetryAfter:
         # honouring it here would change a documented backoff on a header nobody
         # sends.
         assert _get_retry_delay(0, five_oh_three) == 2.0
+
+    def test_a_server_specified_wait_is_capped(self):
+        """hostile-45: honouring a header is not agreeing to block indefinitely.
+
+        `MAX_DELAY` was applied to the exponential ladder and to nothing else, so a `Retry-After` of `3600` produced three hour-long blocking `time.sleep` calls inside a single revision — while `retry_on_transient`'s own docstring promised "capped at 16s". A header is a hint from a server that may be misconfigured, proxied or hostile, and a synchronous library call has no business honouring it without a ceiling.
+
+        The ceiling is `MAX_RETRY_AFTER`, not `MAX_DELAY`, and that is deliberate. `MAX_DELAY` bounds the *blind* exponential ladder, which is guessing; a server-specified wait is information the ladder does not have, and contract-21 is the finding that says ignoring it costs four rejected attempts and a failure mid-revision. Capping the header at 16 s would put a server asking for 30 s back where contract-21 found it. So the two ceilings are separate, and both are documented.
+        """
+        assert _get_retry_delay(0, _rate_limited("3600")) == MAX_RETRY_AFTER
+        assert _get_retry_delay(0, RateLimitError(retry_after=3600.0)) == MAX_RETRY_AFTER
+        assert (
+            _get_retry_delay(0, _make_http_status_error(429, headers={"Retry-After": "3600"}))
+            == MAX_RETRY_AFTER
+        )
+        # And the interval contract-21 measured is still honoured in full.
+        assert _get_retry_delay(0, _rate_limited("30")) == 30.0
+        assert MAX_RETRY_AFTER > MAX_DELAY
+
+    @patch("notion_ops.utils.retry.time.sleep")
+    def test_the_wrapper_sleeps_a_capped_interval_end_to_end(self, mock_sleep):
+        """The ceiling reaches `time.sleep`, not just the delay function."""
+        calls = {"n": 0}
+
+        @retry_on_transient_api
+        def rate_limited():
+            calls["n"] += 1
+            raise _rate_limited("3600")
+
+        with pytest.raises(APIResponseError):
+            rate_limited()
+        assert calls["n"] == MAX_ATTEMPTS
+        assert [c.args[0] for c in mock_sleep.call_args_list] == [MAX_RETRY_AFTER] * (
+            MAX_ATTEMPTS - 1
+        )
+
+    def test_the_header_floor_discriminates_from_the_exponential_fallback(self):
+        """hostile-48: at attempt 0 the fallback is also 2.0, so the floor test above cannot fail for its stated reason.
+
+        At attempt 2 the three candidate behaviours separate: branch present and floored → 2.0; branch absent → 8.0 (the exponential); floor absent → 0.5 (the raw header).
+        """
+        assert _get_retry_delay(2, _rate_limited("0.5")) == 2.0
 
     @patch("notion_ops.utils.retry.time.sleep")
     def test_the_wrapper_sleeps_the_server_specified_interval(self, mock_sleep):
