@@ -6,7 +6,39 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **Versioned revision (`revise_page`, closes AOS ISS-029).** Publish new content
+  for a page as a **new version** instead of rewriting the page in place, so the
+  old page keeps its blocks and every comment anchored to them. `RevisionSchema`
+  carries the caller's own property names (every relation/status field defaults to
+  `None`, meaning "skip that step"), so no workspace convention is baked into the
+  library. Two modes: `new-canonical` (the default; the successor becomes the
+  canonical page and the original is retitled `"(vN)"`, status-stamped and linked
+  forward — the only mode that preserves comment anchors) and `snapshot-in-place`
+  (an explicit opt-in for a hub page whose id other pages relate to: it keeps its
+  id and is rewritten, the old body is snapshotted to a `(vN)` page, and the
+  discussion is transcribed onto that snapshot before the first write, because its
+  anchors cannot survive and the API cannot move them). Exported alongside
+  `RevisionSchema` and `RevisionResult`.
+- **Read-only comments surface.** `client.comments.list(page_or_block_id)` and
+  `client.comments.has_discussion(...)`, on both the sync and async clients,
+  paginated and retry-wrapped. Note the Notion endpoint returns **un-resolved**
+  comments only, so `has_discussion` means "carries an *open* discussion".
+
+### Changed
+- **`republish_block_tree` / `republish_markdown` refuse a destructive rewrite by
+  default.** Both grow keyword-only `allow_destructive: bool = False` and
+  `protected: Callable[[str], bool] | None = None`, and raise the new
+  `DestructiveRepublishError` when a republish that *would write* targets a page
+  carrying an open discussion, or one the caller's `protected` predicate flags.
+  The check runs **after** the content diff and **before** the first write, so an
+  identical-content no-op is neither refused nor charged a comments request, and
+  `allow_destructive=True` reproduces the previous behaviour exactly. The
+  positional signature is unchanged, so existing call sites still compile; a call
+  site that republishes over a *discussed* page will now raise, which is the fix.
+
+  **Migration:** if you republish pages people comment on, either switch to
+  `revise_page` or pass `allow_destructive=True` where the loss is intended.
 
 ## [0.1.0] — 2026-06-02
 
