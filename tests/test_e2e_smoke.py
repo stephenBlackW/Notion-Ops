@@ -356,19 +356,15 @@ class TestNotionDatabaseLifecycle:
 def _live_data_source_id() -> str | None:
     """The data source AC-7-live writes its fixtures into, or ``None`` to skip.
 
-    Read from the environment first so the public library's own suite never has
-    to carry a private workspace's id; the AgenticOS hub, where this cycle runs,
-    supplies it through its config loader instead.
+    ``NOTION_E2E_DATA_SOURCE_ID`` and nothing else. This used to fall back to the
+    hub's configured Atoms data source, which meant a published library's own
+    suite created, related, status-stamped and trashed fixture pages in a private
+    **production** workspace whenever a key happened to be in the environment —
+    and AC-7-live's own text asks for "a scratch data source". A missing variable
+    is ENV-CONSTRAINED, which is a skip, not a licence to aim somewhere else
+    (contract-11).
     """
-    from_env = os.environ.get("NOTION_E2E_DATA_SOURCE_ID")
-    if from_env:
-        return from_env
-    try:
-        from cli.config import get_database_id  # type: ignore[import-not-found]
-
-        return str(get_database_id("atoms", "data_source_id"))
-    except Exception:
-        return None
+    return os.environ.get("NOTION_E2E_DATA_SOURCE_ID") or None
 
 
 LIVE_SCHEMA = RevisionSchema(

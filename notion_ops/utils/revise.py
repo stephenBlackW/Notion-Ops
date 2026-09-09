@@ -47,7 +47,7 @@ from typing import Any
 
 from notion_client import APIResponseError
 
-from notion_ops.exceptions import map_api_error
+from notion_ops.exceptions import NotionOpsError, map_api_error
 from notion_ops.operations.comments import Discussion, list_discussions
 from notion_ops.utils.ids import extract_notion_id
 from notion_ops.utils.markdown import markdown_to_blocks
@@ -57,7 +57,7 @@ from notion_ops.utils.publish import (
     republish_block_tree,
 )
 from notion_ops.utils.responses import sync_dict
-from notion_ops.utils.retry import retry_on_transient
+from notion_ops.utils.retry import retry_on_transient_api
 
 logger = logging.getLogger(__name__)
 
@@ -172,16 +172,36 @@ class _Requests:
         self.count += n
 
 
-@retry_on_transient
+# Every helper below puts the retry wrapper INSIDE the mapping, never outside it.
+# `map_api_error` turns a 503 into a bare NotionOpsError carrying Notion's body
+# text ("Notion is unavailable." — no digits), which the retry predicate cannot
+# recognise, so mapping first spends one attempt where the repo rule asks for
+# four. `retry_on_transient_api` judges the raw SDK error on its status; the
+# mapping then happens once, on the way out (contract-5).
+
+
+@retry_on_transient_api
+def _retrieve_page_raw(client: Any, page_id: str) -> dict[str, Any]:
+    return sync_dict(client.api.pages.retrieve(page_id=page_id))
+
+
 def _retrieve_page(client: Any, page_id: str) -> dict[str, Any]:
     """Read a page, retry-wrapped, mapping API errors to the library's types."""
     try:
-        return sync_dict(client.api.pages.retrieve(page_id=page_id))
+        return _retrieve_page_raw(client, page_id)
     except APIResponseError as e:
         raise map_api_error(e, resource_type="Page", resource_id=page_id) from e
 
 
-@retry_on_transient
+@retry_on_transient_api
+def _create_page_raw(
+    client: Any,
+    parent: dict[str, Any],
+    properties: dict[str, Any],
+) -> dict[str, Any]:
+    return sync_dict(client.api.pages.create(parent=parent, properties=properties))
+
+
 def _create_page(
     client: Any,
     parent: dict[str, Any],
@@ -189,13 +209,17 @@ def _create_page(
 ) -> dict[str, Any]:
     """Create a page, retry-wrapped."""
     try:
-        return sync_dict(client.api.pages.create(parent=parent, properties=properties))
+        return _create_page_raw(client, parent, properties)
     except APIResponseError as e:
         target = str(parent.get(str(parent.get("type", "")), ""))
         raise map_api_error(e, resource_type="Page", resource_id=target) from e
 
 
-@retry_on_transient
+@retry_on_transient_api
+def _update_page_raw(client: Any, page_id: str, properties: dict[str, Any]) -> None:
+    client.api.pages.update(page_id=page_id, properties=properties)
+
+
 def _update_page(client: Any, page_id: str, properties: dict[str, Any]) -> None:
     """Write page properties, retry-wrapped.
 
@@ -205,7 +229,7 @@ def _update_page(client: Any, page_id: str, properties: dict[str, Any]) -> None:
     prevent. "Archived" here is a *status value*, a label on a live page.
     """
     try:
-        client.api.pages.update(page_id=page_id, properties=properties)
+        _update_page_raw(client, page_id, properties)
     except APIResponseError as e:
         raise map_api_error(e, resource_type="Page", resource_id=page_id) from e
 
@@ -233,16 +257,127 @@ def _rich_text_value(text: str) -> dict[str, Any]:
     return {"rich_text": [{"type": "text", "text": {"content": text}}]}
 
 
-def _version_number(properties: dict[str, Any], predecessor_property: str | None) -> int:
-    """``len(predecessor chain) + 1``, read live off the page, never stored.
+#: How far back the version walk will go before it stops counting. A chain this
+#: long is a runaway, not a document history, and the walk costs one read a hop.
+_MAX_CHAIN_DEPTH = 100
 
-    A counter kept anywhere else drifts after a partial failure; the relation
-    chain is the truth, and an empty chain is version 1.
+
+def _relation_ids(properties: dict[str, Any], name: str | None) -> list[str]:
+    """The ids in a relation property, or ``[]`` when it is absent or not one."""
+    if not name:
+        return []
+    entries = (properties.get(name) or {}).get("relation") or []
+    return [
+        str(entry["id"])
+        for entry in entries
+        if isinstance(entry, dict) and entry.get("id")
+    ]
+
+
+def _reject_truncated_relation(
+    properties: dict[str, Any],
+    name: str | None,
+    page_id: str,
+) -> None:
+    """Refuse a relation the page object could only show us part of.
+
+    Notion caps a relation inside a page object at 25 entries and flags the rest
+    with ``has_more``; the full list needs the retrieve-page-property endpoint.
+    Every relation write here is read-modify-write, and read-modify-write on a
+    truncated array silently writes the truncation back. Refusing costs a caller
+    with a 25-deep chain an error; not refusing costs them the entries.
+    """
+    if not name:
+        return
+    prop = properties.get(name)
+    if isinstance(prop, dict) and prop.get("has_more"):
+        raise ValueError(
+            f"the {name!r} relation on {page_id} is truncated (a page object caps a "
+            f"relation at 25 entries and reports has_more), so it cannot be safely "
+            f"extended: merging into what was returned would drop everything past "
+            f"the cap. Refusing before any write."
+        )
+
+
+def _merged_relation(
+    properties: dict[str, Any],
+    name: str,
+    add_id: str,
+) -> dict[str, Any]:
+    """*name*'s existing relation array with *add_id* appended, in write shape.
+
+    A relation write is a **set** operation — the array sent replaces the array
+    stored — and ``Next``/``Previous`` are a dual pair, so dropping an entry also
+    clears the inverse on the page at the other end. Every write here therefore
+    reads first and appends, which is why the whole chain survives a second
+    revision. Already-present ids are not duplicated, so a retried write is safe.
+    """
+    existing = _relation_ids(properties, name)
+    if extract_notion_id(add_id) in {extract_notion_id(i) for i in existing}:
+        return {"relation": [{"id": i} for i in existing]}
+    return {"relation": [{"id": i} for i in [*existing, add_id]]}
+
+
+def _version_number(
+    client: Any,
+    page_id: str,
+    properties: dict[str, Any],
+    predecessor_property: str | None,
+    requests: _Requests,
+) -> int:
+    """One more than the number of distinct ancestors, read live off the chain.
+
+    A counter stored anywhere else drifts after a partial failure, so the relation
+    chain is the truth — but the *length of one page's* ``Previous`` array is not
+    the length of the chain. Under a dual relation, writing ``A.Next = [B]`` gives
+    ``B.Previous = [A]`` and nothing more, so a leaf chain reads ``1, 1, 1, …``
+    and ``len(...) + 1`` saturates at 2 from the third revision onward. A hub page
+    accumulates its snapshots in one array instead, and there the length is right.
+
+    Counting the **transitive** ancestor set is correct for both shapes: it is the
+    chain length for a leaf, and the snapshot count for a hub. The walk costs one
+    read per ancestor, visits no page twice (``seen``), and stops at
+    ``_MAX_CHAIN_DEPTH``. An ancestor that cannot be read is counted where it
+    stands and not expanded — a version number is not worth failing a revision
+    over, and undercounting loudly beats renumbering the chain.
     """
     if not predecessor_property:
         return 1
-    chain = (properties.get(predecessor_property) or {}).get("relation") or []
-    return len(chain) + 1
+    root = extract_notion_id(page_id)
+    seen = {root}
+    frontier = [extract_notion_id(i) for i in _relation_ids(properties, predecessor_property)]
+    ancestors: set[str] = set()
+    while frontier:
+        node = frontier.pop()
+        if node in seen:
+            continue
+        seen.add(node)
+        ancestors.add(node)
+        if len(ancestors) >= _MAX_CHAIN_DEPTH:
+            logger.warning(
+                "Stopped walking the %r chain from %s at %d ancestors; the version "
+                "number is a floor, not a count",
+                predecessor_property,
+                root,
+                len(ancestors),
+            )
+            break
+        try:
+            ancestor = _retrieve_page(client, node)
+        except NotionOpsError as e:
+            logger.warning(
+                "Could not read %s while deriving the version number (%s); counting "
+                "it and stopping that branch",
+                node,
+                e,
+            )
+            continue
+        requests.bump()
+        frontier.extend(
+            extract_notion_id(i)
+            for i in _relation_ids(ancestor.get("properties") or {}, predecessor_property)
+        )
+    return len(ancestors) + 1
 
 
 def _parent_payload(parent: str | None, page: dict[str, Any]) -> dict[str, Any]:
@@ -409,18 +544,45 @@ def _copy_page_body(
     return copied
 
 
+#: What an empty body would cost, said once and reused by all three branches.
+_EMPTY_CONTENT = (
+    "{arg} is {what}: a revision publishes new content, and an empty body would "
+    "promote an empty page over the one that still holds the real content. If the "
+    "content genuinely is nothing, say so in the caller rather than here."
+)
+
+
 def _resolve_content(
     new_markdown: str | None,
     new_blocks: list[dict[str, Any]] | None,
 ) -> list[dict[str, Any]]:
-    """The new body as blocks, with exactly one of the two inputs required."""
+    """The new body as blocks, with exactly one of the two inputs required.
+
+    Empty content is rejected here, **before the first request**. A caller whose
+    markdown came back empty — a failed render, a file read that returned ``""``,
+    an upstream that 200'd with no body — was previously handed a green result
+    with ``content_error=None``, an empty successor promoted to canonical and the
+    real content stamped ``Archived``.
+    """
     if (new_markdown is None) == (new_blocks is None):
         raise ValueError(
             "revise_page requires exactly one of new_markdown or new_blocks"
         )
     if new_markdown is not None:
-        return markdown_to_blocks(new_markdown)
-    return list(new_blocks or [])
+        if not new_markdown.strip():
+            raise ValueError(
+                _EMPTY_CONTENT.format(arg="new_markdown", what="empty or whitespace-only")
+            )
+        blocks = markdown_to_blocks(new_markdown)
+        if not blocks:
+            raise ValueError(
+                _EMPTY_CONTENT.format(arg="new_markdown", what="empty once converted to blocks")
+            )
+        return blocks
+    blocks = list(new_blocks or [])
+    if not blocks:
+        raise ValueError(_EMPTY_CONTENT.format(arg="new_blocks", what="empty"))
+    return blocks
 
 
 def _read_transcript(
@@ -500,6 +662,14 @@ def revise_page(
     page's blocks are untouched, and the version number is derived from the live
     predecessor chain rather than a stored counter, so a re-run after a partial
     failure produces ``(vN+1)`` and a consistent chain rather than a duplicate.
+    The derivation **walks** that chain — ``schema.predecessor_property`` followed
+    back to the root, counting distinct ancestors, one read a hop, cycle-guarded
+    and capped at ``_MAX_CHAIN_DEPTH`` — because the length of a single page's
+    predecessor array is not the length of the chain: a dual relation puts exactly
+    the immediate predecessor there. Every relation write is likewise
+    read-modify-write (``_merged_relation``): a relation write is a set operation,
+    so appending is the only way to add a link without silently removing the
+    others and, through the dual inverse, their other ends.
     The new page is created and populated **before** the original is retitled or
     relinked, so an interruption leaves an orphan page and an untouched original
     — recoverable by hand, never lossy — rather than a relinked original pointing
@@ -522,8 +692,18 @@ def revise_page(
     page = _retrieve_page(client, source_id)
     requests.bump()
     properties = page.get("properties") or {}
+
+    # Both checks run before the first write, per D-5: a relation this call is
+    # going to extend must be complete, or the extension writes the truncation
+    # back over the real array.
+    _reject_truncated_relation(properties, schema.predecessor_property, source_id)
+    if mode == NEW_CANONICAL:
+        _reject_truncated_relation(properties, schema.supersede_property, source_id)
+
     title = _clean_title(_title_text(properties, schema.title_property))
-    version = _version_number(properties, schema.predecessor_property)
+    version = _version_number(
+        client, source_id, properties, schema.predecessor_property, requests
+    )
     new_page_parent = _parent_payload(parent, page)
 
     if mode == NEW_CANONICAL:
@@ -581,16 +761,18 @@ def _revise_new_canonical(
     requests.bump()
     successor_id = extract_notion_id(str(successor.get("id", "")))
 
+    # No `if blocks:` guard: `_resolve_content` has already refused an empty body,
+    # so an unconditional publish is the honest shape. The guard was what let an
+    # empty revision look like a successful one.
     content_error: str | None = None
-    if blocks:
-        published = publish_block_tree(client, successor_id, blocks)
-        requests.bump(published.request_count)
-        if published.partial:
-            content_error = (
-                f"{published.skipped_followups} nested append(s) were skipped while "
-                f"publishing the successor page {successor_id}; the page exists — "
-                f"do not retry the revision"
-            )
+    published = publish_block_tree(client, successor_id, blocks)
+    requests.bump(published.request_count)
+    if published.partial:
+        content_error = (
+            f"{published.skipped_followups} nested append(s) were skipped while "
+            f"publishing the successor page {successor_id}; the page exists — "
+            f"do not retry the revision"
+        )
 
     # The supersede link first: it is the machine-readable half, so an
     # interruption after it leaves a navigable chain rather than an orphan
@@ -599,7 +781,11 @@ def _revise_new_canonical(
         _update_page(
             client,
             source_id,
-            {schema.supersede_property: {"relation": [{"id": successor_id}]}},
+            {
+                schema.supersede_property: _merged_relation(
+                    properties, schema.supersede_property, successor_id
+                )
+            },
         )
         requests.bump()
 
@@ -688,9 +874,9 @@ def _revise_snapshot_in_place(
 
     hub_properties: dict[str, Any] = {}
     if schema.predecessor_property:
-        hub_properties[schema.predecessor_property] = {
-            "relation": [{"id": snapshot_id}]
-        }
+        hub_properties[schema.predecessor_property] = _merged_relation(
+            properties, schema.predecessor_property, snapshot_id
+        )
     if schema.reason_property and reason:
         hub_properties[schema.reason_property] = _rich_text_value(reason)
     if hub_properties:

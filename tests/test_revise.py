@@ -21,6 +21,7 @@ What these tests hold it to:
 from __future__ import annotations
 
 import copy
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -79,8 +80,37 @@ def _title_prop(text: str) -> dict[str, Any]:
     }
 
 
-def _relation(*ids: str) -> dict[str, Any]:
-    return {"type": "relation", "relation": [{"id": i} for i in ids], "has_more": False}
+def _relation(*ids: str, has_more: bool = False) -> dict[str, Any]:
+    return {"type": "relation", "relation": [{"id": i} for i in ids], "has_more": has_more}
+
+
+def _hydrate(properties: dict[str, Any]) -> dict[str, Any]:
+    """A write payload as the API would hand it back on the next read.
+
+    The API adds ``type`` and, on every text span, the ``plain_text`` it derived —
+    which is what ``_title_text`` reads. Without this a page created by the fake
+    has an unreadable title, and a second revision of it would look like a
+    revision of an untitled page.
+    """
+    out = copy.deepcopy(properties)
+    for value in out.values():
+        if not isinstance(value, dict):
+            continue
+        for key in ("title", "rich_text"):
+            spans = value.get(key)
+            if isinstance(spans, list):
+                value.setdefault("type", key)
+                for span in spans:
+                    if isinstance(span, dict):
+                        span.setdefault(
+                            "plain_text", (span.get("text") or {}).get("content", "")
+                        )
+        if "relation" in value:
+            value.setdefault("type", "relation")
+            value.setdefault("has_more", False)
+        if "select" in value:
+            value.setdefault("type", "select")
+    return out
 
 
 class ReviseFakeClient:
@@ -91,6 +121,18 @@ class ReviseFakeClient:
     write" is a statement about this list, not about a mock's call count.
     """
 
+    #: The dual relation pairs the fixture workspace defines, in both directions.
+    #: Notion populates the inverse side of a dual relation itself, and the whole
+    #: version chain is built out of that behaviour, so a fake that does not model
+    #: it cannot express a second revision at all (hostile-4's reason for grading
+    #: its own finding medium rather than high).
+    DUAL_PAIRS = {
+        "Next": "Previous",
+        "Previous": "Next",
+        "Nachfolger": "Vorgaenger",
+        "Vorgaenger": "Nachfolger",
+    }
+
     def __init__(
         self,
         *,
@@ -98,7 +140,9 @@ class ReviseFakeClient:
         blocks: list[dict[str, Any]] | None = None,
         comments: list[dict[str, Any]] | None = None,
         parent: dict[str, Any] | None = None,
+        drop_append_ids: bool = False,
     ) -> None:
+        self.drop_append_ids = drop_append_ids
         self.calls: list[tuple[str, str]] = []
         self.updates: list[tuple[str, dict[str, Any]]] = []
         self.creates: list[dict[str, Any]] = []
@@ -123,6 +167,19 @@ class ReviseFakeClient:
         class _Pages:
             def retrieve(self, *, page_id: str) -> dict[str, Any]:
                 client.calls.append(("pages.retrieve", page_id))
+                if page_id not in client._pages:
+                    # A relation entry always points at a page that exists. An id
+                    # the fixture never registered models an ancestor carrying no
+                    # properties of its own — the end of a chain, not an error.
+                    client._pages[page_id] = {
+                        "object": "page",
+                        "id": page_id,
+                        "parent": {
+                            "type": "data_source_id",
+                            "data_source_id": DATA_SOURCE,
+                        },
+                        "properties": {},
+                    }
                 return copy.deepcopy(client._pages[page_id])
 
             def create(self, **payload: Any) -> dict[str, Any]:
@@ -136,25 +193,34 @@ class ReviseFakeClient:
                     "object": "page",
                     "id": new_id,
                     "parent": copy.deepcopy(payload.get("parent", {})),
-                    "properties": copy.deepcopy(payload.get("properties", {})),
+                    "properties": _hydrate(payload.get("properties", {})),
                 }
                 client._children.setdefault(new_id, [])
+                client._apply_dual_inverse(new_id, payload.get("properties", {}), {})
                 return copy.deepcopy(client._pages[new_id])
 
             def update(self, *, page_id: str, **payload: Any) -> dict[str, Any]:
                 client.calls.append(("pages.update", page_id))
                 client.updates.append((page_id, copy.deepcopy(payload)))
                 stored = client._pages.setdefault(page_id, {"id": page_id, "properties": {}})
-                stored.setdefault("properties", {}).update(payload.get("properties", {}))
+                written = payload.get("properties", {})
+                before = copy.deepcopy(stored.setdefault("properties", {}))
+                stored["properties"].update(_hydrate(written))
                 for flag in ("archived", "in_trash"):
                     if flag in payload:
                         stored[flag] = payload[flag]
+                client._apply_dual_inverse(page_id, written, before)
                 return copy.deepcopy(stored)
 
         class _Children:
             def append(self, *, block_id: str, children: list[dict[str, Any]]) -> dict[str, Any]:
                 client.calls.append(("blocks.append", block_id))
                 ids = client._insert(block_id, children)
+                if client.drop_append_ids:
+                    # The DroppingClient shape (tests/test_republish.py): the
+                    # append lands but returns no ids, so a deferred follow-up
+                    # cannot resolve its parent and the publish is `partial`.
+                    return {"results": []}
                 return {"results": [{"id": i, "type": client._nodes[i].get("type")} for i in ids]}
 
             def list(
@@ -196,6 +262,44 @@ class ReviseFakeClient:
         self.api = _API()
 
     # -- storage -----------------------------------------------------------
+    def _apply_dual_inverse(
+        self,
+        page_id: str,
+        written: dict[str, Any],
+        before: dict[str, Any],
+    ) -> None:
+        """Populate the other side of every dual relation this write touched.
+
+        A relation write is a SET operation, so a target dropped from the array
+        loses its inverse entry too — which is the mechanism that orphaned the
+        earlier snapshots in round 1 and the reason this fake now models it.
+        """
+        for name, value in written.items():
+            inverse = self.DUAL_PAIRS.get(name)
+            if not inverse or not isinstance(value, dict) or "relation" not in value:
+                continue
+            new_ids = [r["id"] for r in value["relation"] if isinstance(r, dict)]
+            old_ids = [
+                r["id"]
+                for r in (before.get(name) or {}).get("relation") or []
+                if isinstance(r, dict)
+            ]
+            for target in set(old_ids) - set(new_ids):
+                entries = (
+                    self._pages.get(target, {}).get("properties", {}).get(inverse, {})
+                ).get("relation")
+                if isinstance(entries, list):
+                    entries[:] = [e for e in entries if e.get("id") != page_id]
+            for target in new_ids:
+                page = self._pages.setdefault(
+                    target, {"object": "page", "id": target, "properties": {}}
+                )
+                prop = page.setdefault("properties", {}).setdefault(
+                    inverse, {"type": "relation", "relation": [], "has_more": False}
+                )
+                if page_id not in [e.get("id") for e in prop["relation"]]:
+                    prop["relation"].append({"id": page_id})
+
     def _insert(self, parent_id: str, blocks: list[dict[str, Any]]) -> list[str]:
         ids: list[str] = []
         self._children.setdefault(parent_id, [])
@@ -246,6 +350,16 @@ class ReviseFakeClient:
     def block_ids(self, page_id: str) -> list[str]:
         return list(self._children.get(page_id, []))
 
+    def title_of(self, page_id: str, name: str = "Name") -> str:
+        """The plain text of a page's title property, as a reader would see it."""
+        spans = (self._pages[page_id]["properties"].get(name) or {}).get("title") or []
+        return "".join((s.get("text") or {}).get("content", "") for s in spans)
+
+    def relation_of(self, page_id: str, name: str) -> list[str]:
+        """The ids currently held by a page's relation property."""
+        prop = self._pages.get(page_id, {}).get("properties", {}).get(name) or {}
+        return [r["id"] for r in prop.get("relation") or []]
+
     def updates_to(self, page_id: str) -> list[dict[str, Any]]:
         return [payload for pid, payload in self.updates if pid == page_id]
 
@@ -293,6 +407,35 @@ class TestValidation:
         client = ReviseFakeClient()
         with pytest.raises(ValueError, match="new_markdown"):
             revise_page(client, SOURCE, **kwargs)
+        assert client.calls == []
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"new_markdown": ""},
+            {"new_markdown": "   \n\n  "},
+            {"new_blocks": []},
+        ],
+        ids=["empty-markdown", "whitespace-markdown", "empty-blocks"],
+    )
+    def test_empty_content_is_refused_before_any_request(self, kwargs):
+        """An empty body is a failed render, not a revision.
+
+        ``markdown_to_blocks("")`` is ``[]``, the publish was skipped, and the
+        result came back green with ``content_error=None`` — an empty successor
+        promoted to canonical and the real content stamped ``Archived``. Nothing
+        is deleted, so it is not ISS-029 again; it is the silent wrong answer on
+        the happy path of the function whose whole selling point is not losing
+        content silently. It now raises before the first request.
+        """
+        client = ReviseFakeClient(
+            properties={"Name": _title_prop("Report"), "Previous": _relation()},
+            blocks=[_para("the real content")],
+        )
+
+        with pytest.raises(ValueError, match="empty"):
+            revise_page(client, SOURCE, schema=ATOMS_LIKE, **kwargs)
+
         assert client.calls == []
 
     def test_unknown_mode_raises_before_any_request(self):
@@ -389,11 +532,10 @@ class TestSupersededPage:
         )
 
         assert result.version == 2
-        stored = client._pages[SOURCE_ID]["properties"]
-        assert stored["Name"] == {
-            "title": [{"type": "text", "text": {"content": "Report (v2)"}}]
+        assert client.title_of(SOURCE_ID) == "Report (v2)"
+        assert client._pages[SOURCE_ID]["properties"]["Status"]["select"] == {
+            "name": "Archived"
         }
-        assert stored["Status"] == {"select": {"name": "Archived"}}
 
     def test_old_body_is_never_touched_and_the_page_is_never_trashed(self):
         client = ReviseFakeClient(
@@ -428,11 +570,8 @@ class TestSupersededPage:
 
         revise_page(client, SOURCE, new_markdown="new", schema=schema)
 
-        stored = client._pages[SOURCE_ID]["properties"]
-        assert "Status" not in stored
-        assert stored["Name"] == {
-            "title": [{"type": "text", "text": {"content": "Report (v1)"}}]
-        }
+        assert "Status" not in client._pages[SOURCE_ID]["properties"]
+        assert client.title_of(SOURCE_ID) == "Report (v1)"
 
     def test_version_suffix_does_not_compound(self):
         client = ReviseFakeClient(
@@ -446,9 +585,7 @@ class TestSupersededPage:
         result = revise_page(client, SOURCE, new_markdown="new", schema=ATOMS_LIKE)
 
         assert result.version == 3
-        assert client._pages[SOURCE_ID]["properties"]["Name"] == {
-            "title": [{"type": "text", "text": {"content": "Report (v3)"}}]
-        }
+        assert client.title_of(SOURCE_ID) == "Report (v3)"
         # The successor carries the CLEAN title.
         created = client.creates[0]["properties"]
         assert created["Name"] == {
@@ -491,6 +628,38 @@ class TestSuccessor:
         # Computed types Notion rejects on write are not carried.
         assert "Creation Date" not in props
         assert client.text_of(result.canonical_page_id) == ["the new content"]
+
+    def test_a_computed_property_named_in_carry_properties_is_skipped(self):
+        """The skip is only *reached* when ``carry_properties`` names one.
+
+        The round-1 test asserted ``"Creation Date" not in props`` under a schema
+        whose ``carry_properties`` was ``("Type", "Action Item")`` — so
+        ``_carried_properties`` never visited the name and the assertion held for
+        the wrong reason. Deleting the branch left the suite green. This schema
+        names two computed properties, so the branch is the only thing keeping
+        them out of the create payload, and Notion would 400 the whole page
+        creation on either of them.
+        """
+        schema = replace(ATOMS_LIKE, carry_properties=("Type", "Creation Date", "Serial"))
+        client = ReviseFakeClient(
+            properties={
+                "Name": _title_prop("Report"),
+                "Previous": _relation(),
+                "Type": {"id": "t", "type": "select", "select": {"name": "Report"}},
+                "Creation Date": {"type": "created_time", "created_time": "2026-01-01"},
+                "Serial": {"type": "unique_id", "unique_id": {"prefix": "A", "number": 7}},
+            },
+            blocks=[_para("old")],
+        )
+
+        revise_page(client, SOURCE, new_markdown="new", schema=schema)
+
+        props = client.creates[0]["properties"]
+        assert "Creation Date" not in props
+        assert "Serial" not in props
+        # The writable neighbour still travels, so this is a skip and not a
+        # collapse of the whole carry step.
+        assert props["Type"] == {"select": {"name": "Report"}}
 
     def test_absent_carry_property_is_skipped_not_nulled(self):
         client = ReviseFakeClient(
@@ -553,6 +722,158 @@ class TestSuccessor:
         assert result.content_error is None
         # New-canonical puts nothing at risk, so it does not read the discussion.
         assert [c for c in client.calls if c[0] == "comments.list"] == []
+
+
+# ---------------------------------------------------------------------------
+# The version chain — a relation write is a SET, so it must be read-modify-write
+# ---------------------------------------------------------------------------
+
+
+class TestVersionChainNewCanonical:
+    """Four consecutive revisions must leave ONE chain, correctly numbered.
+
+    Every test in round 1 revised exactly once, which is the only number of
+    revisions at which a chain has nothing to say. ``len(Previous) + 1`` is a
+    version number only if ``Previous`` accumulates the whole chain; under a dual
+    relation it holds exactly the immediate predecessor, so the count saturated
+    and the third revision onward stamped a duplicate ``(v2)``.
+    """
+
+    def test_four_consecutive_revisions_build_one_numbered_chain(self):
+        client = ReviseFakeClient(
+            properties={"Name": _title_prop("Report"), "Previous": _relation()},
+            blocks=[_para("body 1")],
+        )
+
+        canonical = SOURCE_ID
+        superseded: list[str] = []
+        for n in range(1, 5):
+            result = revise_page(
+                client, canonical, new_markdown=f"body {n + 1}", schema=ATOMS_LIKE
+            )
+            assert result.version == n
+            assert result.archived_page_id == canonical
+            superseded.append(canonical)
+            canonical = result.canonical_page_id
+
+        # Distinct and monotonic: (v1), (v2), (v3), (v4) — not (v1), (v2), (v2).
+        titles = [client.title_of(p) for p in superseded]
+        assert titles == ["Report (v1)", "Report (v2)", "Report (v3)", "Report (v4)"]
+        assert len(set(titles)) == len(titles)
+
+        # Every link resolves, in both directions, and the newest page is the
+        # only one without a successor.
+        chain = [*superseded, canonical]
+        for older, newer in zip(chain, chain[1:]):
+            assert client.relation_of(older, "Next") == [newer]
+            assert client.relation_of(newer, "Previous") == [older]
+        assert client.relation_of(canonical, "Next") == []
+
+        # No orphan: every page this run created is in the chain.
+        created = {pid for pid in client._pages if pid.startswith("page")}
+        assert created == set(chain[1:])
+
+    def test_an_existing_supersede_link_is_merged_not_replaced(self):
+        """Revising an already-superseded page must not unlink its successor.
+
+        A relation write replaces the array, and ``Next``/``Previous`` are dual,
+        so overwriting ``Next`` clears the matching ``Previous`` on the page that
+        was already linked — silently, on the server, from a payload that never
+        mentioned it.
+        """
+        client = ReviseFakeClient(
+            properties={
+                "Name": _title_prop("Report"),
+                "Previous": _relation(),
+                "Next": _relation("earlier"),
+            },
+            blocks=[_para("old")],
+        )
+        client._pages["earlier"] = {
+            "object": "page",
+            "id": "earlier",
+            "parent": {"type": "data_source_id", "data_source_id": DATA_SOURCE},
+            "properties": {"Name": _title_prop("Report (v1)"), "Previous": _relation(SOURCE_ID)},
+        }
+
+        result = revise_page(client, SOURCE, new_markdown="new", schema=ATOMS_LIKE)
+
+        ((page_id, prop, targets),) = client.relation_writes()
+        assert (page_id, prop) == (SOURCE_ID, "Next")
+        assert targets == ["earlier", result.canonical_page_id]
+        assert client.relation_of("earlier", "Previous") == [SOURCE_ID]
+
+    def test_a_truncated_relation_refuses_before_any_write(self):
+        """Read-modify-write on a truncated array would drop what it cannot see.
+
+        The page object caps a relation at 25 entries and says so with
+        ``has_more``; merging into that payload would write back a 25-entry array
+        over a longer one. Refuse instead, before the first write.
+        """
+        client = ReviseFakeClient(
+            properties={
+                "Name": _title_prop("Report"),
+                "Previous": _relation(),
+                "Next": _relation("a", has_more=True),
+            },
+            blocks=[_para("old")],
+        )
+
+        with pytest.raises(ValueError, match="truncated"):
+            revise_page(client, SOURCE, new_markdown="new", schema=ATOMS_LIKE)
+
+        assert [c for c in client.calls if c[0] != "pages.retrieve"] == []
+
+
+class TestVersionChainSnapshotInPlace:
+    """The hub accumulates its snapshots; nothing it linked may be unlinked.
+
+    This is the mode the chain bug actually bit, by definition: snapshot mode
+    exists for a page that gets revised repeatedly, and a relation write that
+    replaces the array unlinked the previous snapshot on every single revision —
+    in both directions, because the pair is dual — leaving orphans reachable from
+    nothing and a version number frozen at 2.
+    """
+
+    def test_four_consecutive_snapshots_all_stay_linked(self):
+        client = ReviseFakeClient(
+            properties={"Name": _title_prop("Package Hub"), "Previous": _relation()},
+            blocks=[_para("hub body one"), _para("hub body two")],
+        )
+
+        snapshots: list[str] = []
+        for n in range(1, 5):
+            result = revise_page(
+                client,
+                SOURCE,
+                new_markdown=f"replacement {n}",
+                schema=ATOMS_LIKE,
+                mode=SNAPSHOT_IN_PLACE,
+            )
+            assert result.version == n
+            assert result.canonical_page_id == SOURCE_ID
+            snapshots.append(result.archived_page_id)
+
+            # The hub's Previous grows by exactly one each time, and keeps every
+            # earlier entry in order.
+            assert client.relation_of(SOURCE_ID, "Previous") == snapshots
+
+        titles = [client.title_of(p) for p in snapshots]
+        assert titles == [
+            "Package Hub (v1)",
+            "Package Hub (v2)",
+            "Package Hub (v3)",
+            "Package Hub (v4)",
+        ]
+        assert len(set(titles)) == len(titles)
+
+        # No orphan: every snapshot still points back at the hub through the dual
+        # inverse, so each is reachable from the page it belongs to.
+        for snapshot in snapshots:
+            assert client.relation_of(snapshot, "Next") == [SOURCE_ID]
+
+        # The hub keeps its id and carries only the newest content.
+        assert client.text_of(SOURCE_ID) == ["replacement 4"]
 
 
 # ---------------------------------------------------------------------------
