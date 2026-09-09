@@ -528,6 +528,14 @@ _UNCOPYABLE_BLOCK_TYPES = frozenset(
 #: one it knows least about destroying (nops-cycle-3 rev4, hostile-39).
 _UNTYPED_BLOCK = "<untyped>"
 
+#: Appended to the type name of a block whose *type body* did not come back as an
+#: object. The block is identified, so the refusal can name it; what cannot be
+#: established is its content, and substituting ``{}`` there put a block on the
+#: snapshot with the right shape and none of its text while the rewrite deleted
+#: the original — the same "unknown is not empty" rule one layer in from the
+#: reader (nops-cycle-3 rev6, hostile-41).
+_UNREADABLE_BODY = "<unreadable body>"
+
 
 def _sanitize_rich_text(spans: Any) -> list[Any]:
     """Strip the API-only fields (``plain_text``, ``href``) off a rich-text array."""
@@ -546,8 +554,10 @@ def _sanitize_block(block: dict[str, Any], skipped: set[str]) -> dict[str, Any] 
     Returns ``None`` for a block type the API cannot re-create from its own
     payload; the type is recorded in *skipped* so the caller can say what did not
     make it onto the snapshot. A block with no usable ``type`` at all is recorded
-    too, under :data:`_UNTYPED_BLOCK`, so that it refuses by the same path instead
-    of vanishing from the copy while the rewrite deletes it at source.
+    too, under :data:`_UNTYPED_BLOCK`, and so is one whose type body did not come
+    back as an object (:data:`_UNREADABLE_BODY`), so that both refuse by the same
+    path instead of reaching the snapshot hollowed out while the rewrite deletes
+    the original at source.
     """
     btype = block.get("type", "")
     if not isinstance(btype, str) or not btype or btype in _UNCOPYABLE_BLOCK_TYPES:
@@ -555,7 +565,11 @@ def _sanitize_block(block: dict[str, Any], skipped: set[str]) -> dict[str, Any] 
         return None
     body = block.get(btype)
     if not isinstance(body, dict):
-        return {"object": "block", "type": btype, btype: {}}
+        # An empty body is a claim about the block's content that this function is
+        # in no position to make. Uncopyable, by the same definition the branch
+        # above uses (nops-cycle-3 rev6, hostile-41).
+        skipped.add(f"{btype} {_UNREADABLE_BODY}")
+        return None
 
     clean: dict[str, Any] = {}
     for key, value in body.items():
@@ -714,21 +728,43 @@ def revise_page(
         ValueError: Neither or both of ``new_markdown``/``new_blocks``; empty
             content in either of them; an unknown ``mode``;
             ``mode="snapshot-in-place"`` without ``schema.predecessor_property``
-            (which would orphan the snapshot); a relation this call would extend
-            or carry that the page object returned truncated; or a source page
-            whose parent cannot be derived.
-        NotFoundError: ``page_id`` cannot be read.
+            (which would orphan the snapshot); or a source page whose parent
+            cannot be derived. Also a relation this call would extend **or
+            carry** that the page object returned truncated: Notion caps a
+            relation array in a page object at 25 entries and flags the rest with
+            ``has_more``, and a relation write is a set operation, so writing that
+            short array back would drop the entries past the cap and, through the
+            dual inverse, their other ends. Refused before any write. The remedy
+            is to drop that property from ``carry_properties`` for this call, or
+            to read the full array through the retrieve-page-property endpoint
+            and pass it explicitly.
+        NotFoundError: ``page_id`` cannot be read — or, in snapshot mode, a block
+            of its body cannot be. The body read is mapped like every other read
+            in this module, so what a caller catches is this and never a raw
+            ``notion_client.APIResponseError``.
         NotionOpsError: An ancestor read failed transiently while the version was
             being derived — a 429, a 5xx that survived every attempt, a network
             failure. The walk runs before the first write, so nothing has changed
             and the call can simply be retried; counting the ancestor instead
             would stamp a version number another page in the chain already has.
+            Only a definitive *not-found* or *forbidden* ends the walk normally.
+            Every request this function issues is retried up to
+            ``retry.MAX_ATTEMPTS`` times on a transient status, and a 429 waits
+            the ``Retry-After`` the server asked for, bounded by
+            ``retry.MAX_RETRY_AFTER``.
         IncompleteSnapshotError: Snapshot mode only, and always **before** the
             in-place rewrite — the page is left untouched. Raised when the old
             body could not be read in full, when the source carries a block type
             the API cannot re-create, or when the snapshot's own publish came back
-            partial. Import it from ``notion_ops.exceptions``; it is a
-            ``NotionOpsError``.
+            partial. "Read in full" is strict: the body listing is refused, rather
+            than shortened, on a truncated page, an envelope that is not an
+            object, a ``results`` that is not a list, an entry that is not a block
+            object (including a ``dict`` with no ``id`` or with a non-``block``
+            ``object``), and a block whose type body is not an object. A listing
+            with an entry quietly thrown away is a listing whose completeness
+            cannot be established, and this is the one caller that is about to
+            delete the only other copy. Import it from ``notion_ops.exceptions``;
+            it is a ``NotionOpsError``.
         OversizedContentError: Propagated from the markdown conversion.
 
     A re-run is **not idempotent** — revising twice legitimately means two

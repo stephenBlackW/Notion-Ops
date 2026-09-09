@@ -33,7 +33,13 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from notion_ops.exceptions import DestructiveRepublishError, NotionOpsError
+from notion_client import APIResponseError
+
+from notion_ops.exceptions import (
+    DestructiveRepublishError,
+    NotionOpsError,
+    map_api_error,
+)
 from notion_ops.operations.comments import list_discussions
 from notion_ops.utils.ids import extract_notion_id
 from notion_ops.utils.markdown import (
@@ -42,7 +48,7 @@ from notion_ops.utils.markdown import (
     _estimate_block_size,
     markdown_to_blocks,
 )
-from notion_ops.utils.retry import retry_on_transient
+from notion_ops.utils.retry import retry_on_transient, retry_on_transient_api
 
 logger = logging.getLogger(__name__)
 
@@ -598,12 +604,33 @@ def _list_children_blocks(
             completeness cannot be established.
     """
 
-    @retry_on_transient
-    def _list(bid: str, cursor: str | None) -> Any:
+    @retry_on_transient_api
+    def _request(bid: str, cursor: str | None) -> Any:
         params: dict[str, Any] = {"block_id": bid, "page_size": 100}
         if cursor:
             params["start_cursor"] = cursor
         return client.api.blocks.children.list(**params)
+
+    def _list(bid: str, cursor: str | None) -> Any:
+        """The request, retried on a transient status and mapped on the way out.
+
+        The mapping is deliberately *outside* the retry wrapper. A mapped 503 is a
+        bare ``NotionOpsError`` carrying Notion's body text, and no predicate can
+        recognise that as transient — mapping inside turns four attempts into one,
+        which is exactly what the old ``retry_on_transient`` did here: its
+        ``_should_retry`` cannot see a coded SDK 503 at all, so the read this
+        module's strictest caller depends on got one attempt where the contract
+        promises four (nops-cycle-3 rev6, hostile-42/contract-32).
+
+        Mapping at all is the other half: an unmapped ``APIResponseError`` is not
+        a :class:`NotionOpsError`, so it sails straight past
+        ``_revise_snapshot_in_place``'s ``except NotionOpsError`` fold and reaches
+        a caller whose ``Raises:`` never named an SDK type (hostile-43).
+        """
+        try:
+            return _request(bid, cursor)
+        except APIResponseError as e:
+            raise map_api_error(e, resource_type="Block", resource_id=bid) from e
 
     def _unusable(what: str) -> NotionOpsError:
         return NotionOpsError(
@@ -628,8 +655,17 @@ def _list_children_blocks(
         for block in results or []:
             if strict and not isinstance(block, dict):
                 raise _unusable(f"a {type(block).__name__} where a block object belongs")
-            if block.get("id"):
-                blocks.append(block)
+            kind = block.get("object")
+            if strict and kind is not None and kind != "block":
+                raise _unusable(f"an entry whose 'object' is {kind!r} where a block object belongs")
+            if not block.get("id"):
+                if strict:
+                    raise _unusable("a block object with no id")
+                # The default drops it, and must: the two callers on this path are
+                # diffing to decide what to delete, and an entry with no id is one
+                # they cannot delete and must not guess at.
+                continue
+            blocks.append(block)
         if not response.get("has_more"):
             break
         cursor = response.get("next_cursor")

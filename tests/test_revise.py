@@ -37,6 +37,7 @@ from notion_ops.utils.ids import extract_notion_id
 from notion_ops.utils.publish import _children_of, _without_children
 from notion_ops.utils.revise import (
     _UNCOPYABLE_BLOCK_TYPES,
+    _UNREADABLE_BODY,
     _UNTYPED_BLOCK,
     NEW_CANONICAL,
     SNAPSHOT_IN_PLACE,
@@ -460,6 +461,9 @@ def _malform_the_first_hub_read(
     - ``non-dict`` — not a JSON object at all;
     - ``results-not-a-list`` — an envelope whose ``results`` is not a list;
     - ``non-block-entry`` — a well-formed envelope whose ``results`` *is* a list, carrying something that is not a block object among otherwise valid blocks. The one shape whose lax path does not degrade to a short listing at all: without the strict arm ``block.get("id")`` raises ``AttributeError``, which the caller's ``except NotionOpsError`` fold cannot map, so the caller gets an unmapped crash where the contract promises ``IncompleteSnapshotError`` (nops-cycle-3 rev5, R3-3).
+    - ``error-entry`` — the same shape one step subtler: the interloper is a ``dict``, so it survives the ``isinstance`` arm, and it is the shape an intermediary actually produces, ``{"object": "error", ...}``. Discarded silently before rev6 (nops-cycle-3 rev6, hostile-40).
+    - ``no-id-entry`` — a block object that is a dict and says ``"object": "block"`` and simply has no ``id``. This is the one that loses content: the entry is dropped, the snapshot comes back one block short, and the ``allow_destructive=True`` rewrite destroys the original anyway (nops-cycle-3 rev6, hostile-40).
+    - ``unreadable-body`` — a well-formed, identified block whose *type body* is not an object. Nothing about the listing is wrong here; the damage is one layer in, in the sanitizer (nops-cycle-3 rev6, hostile-41).
     """
     state = {"spent": False}
 
@@ -480,6 +484,18 @@ def _malform_the_first_hub_read(
         if shape == "non-block-entry":
             results = list(envelope["results"])
             results.insert(1, "hub block 2")
+            return {"results": results, "has_more": False, "next_cursor": None}
+        if shape == "error-entry":
+            results = list(envelope["results"])
+            results.insert(1, {"object": "error", "status": 400, "code": "validation_error"})
+            return {"results": results, "has_more": False, "next_cursor": None}
+        if shape == "no-id-entry":
+            results = [dict(r) for r in envelope["results"]]
+            results[1].pop("id", None)
+            return {"results": results, "has_more": False, "next_cursor": None}
+        if shape == "unreadable-body":
+            results = [dict(r) for r in envelope["results"]]
+            results[1]["paragraph"] = None
             return {"results": results, "has_more": False, "next_cursor": None}
         raise AssertionError(f"unknown malformed shape {shape!r}")
 
@@ -1371,6 +1387,8 @@ class TestSnapshotInPlace:
             ("non-dict", 0, 3, "rather than a list envelope"),
             ("results-not-a-list", 0, 3, "no usable 'results'"),
             ("non-block-entry", 0, 3, "a str where a block object belongs"),
+            ("error-entry", 0, 3, "whose 'object' is 'error'"),
+            ("no-id-entry", 0, 3, "a block object with no id"),
         ],
         ids=[
             "truncated-with-content",
@@ -1378,6 +1396,8 @@ class TestSnapshotInPlace:
             "non-dict-envelope",
             "results-not-a-list",
             "non-block-entry",
+            "error-entry",
+            "no-id-entry",
         ],
     )
     def test_a_malformed_children_read_refuses_before_anything_is_written(
@@ -1403,6 +1423,8 @@ class TestSnapshotInPlace:
         page byte-for-byte as it was.
 
         The `non-block-entry` case (nops-cycle-3 rev5, R3-3) is the fourth strict arm, and it is the only one whose lax path does not merely under-report: a str inside a well-formed `results` list makes `block.get("id")` raise `AttributeError`, which `except NotionOpsError` does not catch, so what reaches the caller is an unmapped crash rather than the `IncompleteSnapshotError` the contract promises. Asserting the exception *type* here is therefore the load-bearing half of the case, not boilerplate shared with its three siblings.
+
+        The last two cases (nops-cycle-3 rev6, hostile-40) are the fifth and sixth conditions that decide whether an entry survives the loop, and before rev6 neither refused: `if block.get("id"):` discarded both without a word, in both modes. `error-entry` is a `dict`, so rev5's `isinstance` arm waves it through; `no-id-entry` is the one that was measured losing content — three hub blocks in, two on the snapshot, `content_error=None`, and the rewrite then deleted all three at source. A listing with an entry thrown away is precisely a listing whose completeness cannot be established, which is the promise `strict=True` makes.
         """
         client = ReviseFakeClient(
             properties={"Name": _title_prop("Package Hub"), "Previous": _relation()},
@@ -1463,6 +1485,84 @@ class TestSnapshotInPlace:
         assert caught.value.block_types == (_UNTYPED_BLOCK,)
         assert _UNTYPED_BLOCK in str(caught.value)
         assert caught.value.snapshot_page_id is None
+        assert [c for c in client.calls if c[0] in _WRITE_CALLS] == []
+        assert client.block_ids(SOURCE_ID) == before_ids
+
+    def test_a_block_whose_body_cannot_be_read_refuses_instead_of_emptying_it(self):
+        """hostile-41: an unreadable body is unknown, not empty — same rule, one layer in.
+
+        `_sanitize_block` returned `{"object": "block", "type": btype, btype: {}}` for a block whose type body came back as anything other than an object, and recorded nothing in `skipped`. So the block reached the snapshot with the right *shape* and none of its content, the refusal could not fire, and the `allow_destructive=True` rewrite then deleted the original. Measured before the fix, with the middle block's `paragraph` body replaced by `None` in the first hub read: `content_error=None`, hub `['replacement']`, snapshot `['hub block 1', '', 'hub block 3']`.
+
+        That is worse than the dropped entry hostile-40 describes, because the snapshot looks complete: three blocks in, three blocks out, nothing in `skipped` and nothing in the result to tell the caller that the middle one is now empty. The block is uncopyable by this module's own definition of the word, so it is recorded as such and refuses by the path `_UNTYPED_BLOCK` already established.
+        """
+        client = ReviseFakeClient(
+            properties={"Name": _title_prop("Package Hub"), "Previous": _relation()},
+            blocks=[_para(f"hub block {i + 1}") for i in range(3)],
+            children_envelope=_malform_the_first_hub_read("unreadable-body"),
+        )
+        before_ids = client.block_ids(SOURCE_ID)
+        before_text = client.text_of(SOURCE_ID)
+
+        with pytest.raises(IncompleteSnapshotError) as caught:
+            revise_page(
+                client,
+                SOURCE,
+                new_markdown="replacement",
+                schema=ATOMS_LIKE,
+                mode=SNAPSHOT_IN_PLACE,
+            )
+
+        # The refusal names the block, not just the fact that something failed.
+        assert caught.value.block_types == (f"paragraph {_UNREADABLE_BODY}",)
+        assert "paragraph" in str(caught.value)
+        assert _UNREADABLE_BODY in str(caught.value)
+        assert caught.value.snapshot_page_id is None
+        assert [c for c in client.calls if c[0] in _WRITE_CALLS] == []
+        assert client.block_ids(SOURCE_ID) == before_ids
+        assert client.text_of(SOURCE_ID) == before_text
+
+    def test_a_mapped_non_malformed_error_from_the_body_read_is_not_relabelled(self):
+        """hostile-46 + hostile-43: the fold's narrowing is reachable now, and this is what it is for.
+
+        `_revise_snapshot_in_place` catches `NotionOpsError` and re-raises anything whose code is not `malformed_response`. Until rev6 that guard could not fire, for the reason hostile-43 gives: `_list_children_blocks` mapped nothing, so the only `NotionOpsError` it could produce was the strict reader's own — and everything else escaped as a raw `notion_client.APIResponseError`, past the fold entirely, to a caller whose `Raises:` never named an SDK type.
+
+        With the mapping in place a 404 on the body read arrives as `NotFoundError`. It must reach the caller as that: "the old body could not be read in full" is a claim about a *truncated* listing, and reporting a deleted page under it would send the caller to `mode='new-canonical'`, which cannot help. Two properties, both load-bearing: the type is the mapped one, not the SDK's and not `IncompleteSnapshotError`; and the refusal is still before the first write.
+        """
+        from notion_client import APIResponseError
+        from notion_client.errors import APIErrorCode
+        from httpx import Headers
+
+        from notion_ops.exceptions import NotFoundError
+
+        def _raise_404(block_id, envelope, nth):
+            if block_id != SOURCE_ID:
+                return envelope
+            raise APIResponseError(
+                code=APIErrorCode.ObjectNotFound,
+                status=404,
+                message="Could not find block with ID.",
+                headers=Headers({}),
+                raw_body_text='{"object":"error","code":"object_not_found"}',
+            )
+
+        client = ReviseFakeClient(
+            properties={"Name": _title_prop("Package Hub"), "Previous": _relation()},
+            blocks=[_para("hub block 1")],
+            children_envelope=_raise_404,
+        )
+        before_ids = client.block_ids(SOURCE_ID)
+
+        with pytest.raises(NotFoundError) as caught:
+            revise_page(
+                client,
+                SOURCE,
+                new_markdown="replacement",
+                schema=ATOMS_LIKE,
+                mode=SNAPSHOT_IN_PLACE,
+            )
+
+        assert not isinstance(caught.value, IncompleteSnapshotError)
+        assert not isinstance(caught.value, APIResponseError)
         assert [c for c in client.calls if c[0] in _WRITE_CALLS] == []
         assert client.block_ids(SOURCE_ID) == before_ids
 

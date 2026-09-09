@@ -19,8 +19,12 @@ from __future__ import annotations
 
 import copy
 from typing import Any
+from unittest.mock import patch
 
 import pytest
+from httpx import Headers
+from notion_client import APIResponseError
+from notion_client.errors import APIErrorCode
 
 from notion_ops.utils.ids import extract_notion_id
 
@@ -565,6 +569,185 @@ class TestListingAndCounts:
         assert "a str where a block object belongs" in str(caught.value)
         assert caught.value.code == "malformed_response"
 
+    def test_strict_refuses_a_dict_entry_that_is_not_a_usable_block(self):
+        """The fifth and sixth strict arms (nops-cycle-3 rev6, hostile-40).
+
+        The sibling test above refuses an entry that is not a `dict`. Everything below that line was still waved through by `if block.get("id"):`, which discarded the entry silently in both modes — and `dict` is the likelier shape by a distance, because `{"object": "error", ...}` is what an intermediary interleaves into a `results` array and a block object that lost its `id` is what a partial serialisation produces.
+
+        Discarding is the wrong answer for the strict caller for exactly the reason the other four arms exist: the entry was there, the reader did not return it, and the caller is about to delete the only other copy. Measured on the rev5 tree before this arm existed: a three-block hub snapshotted two blocks, `content_error=None`, and the rewrite destroyed the third.
+
+        The default keeps dropping, and that is deliberate rather than an oversight left in place: the two lax call sites are diffing to decide what to **delete**, and an entry with no id is one they cannot delete and must not guess at.
+        """
+        from notion_ops.exceptions import NotionOpsError
+        from notion_ops.utils.publish import _list_children_blocks
+
+        def _client(envelope):
+            class _Children:
+                def list(self, *, block_id, page_size=100, start_cursor=None):
+                    return envelope
+
+            class _Blocks:
+                children = _Children()
+
+            class _API:
+                blocks = _Blocks()
+
+            class _Client:
+                api = _API()
+
+            return _Client()
+
+        def _envelope(interloper):
+            return {
+                "results": [{"object": "block", "id": "blk-0"}, interloper, {"object": "block", "id": "blk-2"}],
+                "has_more": False,
+                "next_cursor": None,
+            }
+
+        error_entry = _envelope({"object": "error", "status": 400, "code": "validation_error"})
+        no_id_entry = _envelope({"object": "block", "type": "paragraph"})
+
+        # Default: unchanged — the entry is dropped and the two pre-existing call
+        # sites see the listing they saw before the keyword existed.
+        for envelope in (error_entry, no_id_entry):
+            got = _list_children_blocks(_client(envelope), "page-x")
+            assert [b["id"] for b in got] == ["blk-0", "blk-2"]
+
+        # Strict: a typed refusal naming which of the two conditions failed.
+        for envelope, phrase in [
+            (error_entry, "whose 'object' is 'error'"),
+            (no_id_entry, "a block object with no id"),
+        ]:
+            with pytest.raises(NotionOpsError) as caught:
+                _list_children_blocks(_client(envelope), "page-x", strict=True)
+            assert phrase in str(caught.value)
+            assert caught.value.code == "malformed_response"
+
+
+class TestListingRetryAndMapping:
+    """hostile-42/43 + contract-32: the read the whole refusal rests on.
+
+    `_list_children_blocks`'s inner `_list` was decorated with the OLD `retry_on_transient`, whose predicate `_should_retry` is the one contract-5 proved blind to a coded Notion 503 — the body reads "Notion is unavailable.", carries no digits, is not an `HTTPStatusError` and is not a `RateLimitError`. So the read got one attempt where the spec promises four. And it mapped nothing, so a terminal failure escaped as a raw `notion_client.APIResponseError`: not a `NotionOpsError`, therefore invisible to `_revise_snapshot_in_place`'s `except NotionOpsError` fold, therefore an SDK type reaching a caller whose `Raises:` section never named one.
+
+    The fix is the shape rev2 already gave the comments reader: `retry_on_transient_api` on the request, `map_api_error` one layer out.
+    """
+
+    @staticmethod
+    def _raising_client(error, *, raises: int = 99):
+        """A client whose `blocks.children.list` raises *error* for its first *raises* calls."""
+
+        class _Children:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def list(self, *, block_id, page_size=100, start_cursor=None):
+                self.calls += 1
+                if self.calls <= raises:
+                    raise error
+                return {"results": [{"object": "block", "id": "blk-0"}], "has_more": False}
+
+        children = _Children()
+
+        class _Blocks:
+            pass
+
+        _Blocks.children = children
+
+        class _API:
+            blocks = _Blocks()
+
+        class _Client:
+            api = _API()
+
+        return _Client(), children
+
+    @staticmethod
+    def _api_error(status, code, message):
+        return APIResponseError(
+            code=code,
+            status=status,
+            message=message,
+            headers=Headers({}),
+            raw_body_text='{"object":"error"}',
+        )
+
+    @patch("notion_ops.utils.retry.time.sleep")
+    def test_a_coded_503_is_retried_four_times_and_surfaces_mapped(self, mock_sleep):
+        from notion_ops.exceptions import NotionOpsError
+        from notion_ops.utils.publish import _list_children_blocks
+        from notion_ops.utils.retry import MAX_ATTEMPTS
+
+        err = self._api_error(503, APIErrorCode.ServiceUnavailable, "Notion is unavailable.")
+        client, children = self._raising_client(err)
+
+        with pytest.raises(NotionOpsError) as caught:
+            _list_children_blocks(client, "page-x", strict=True)
+
+        # Four attempts, not one: the predicate reads `.status` now.
+        assert children.calls == MAX_ATTEMPTS
+        assert len(mock_sleep.call_args_list) == MAX_ATTEMPTS - 1
+        # And what escapes is the library's own type, which the caller's fold sees.
+        assert not isinstance(caught.value, APIResponseError)
+
+    @patch("notion_ops.utils.retry.time.sleep")
+    def test_a_recovering_503_is_read_normally(self, mock_sleep):
+        from notion_ops.utils.publish import _list_children_blocks
+
+        err = self._api_error(503, APIErrorCode.ServiceUnavailable, "Notion is unavailable.")
+        client, children = self._raising_client(err, raises=2)
+
+        assert [b["id"] for b in _list_children_blocks(client, "page-x", strict=True)] == ["blk-0"]
+        assert children.calls == 3
+
+    @patch("notion_ops.utils.retry.time.sleep")
+    def test_a_404_is_mapped_and_not_retried(self, mock_sleep):
+        from notion_ops.exceptions import NotFoundError
+        from notion_ops.utils.publish import _list_children_blocks
+
+        err = self._api_error(404, APIErrorCode.ObjectNotFound, "Could not find block.")
+        client, children = self._raising_client(err)
+
+        with pytest.raises(NotFoundError):
+            _list_children_blocks(client, "page-x", strict=True)
+        assert children.calls == 1
+        assert mock_sleep.call_args_list == []
+
+    @patch("notion_ops.utils.retry.time.sleep")
+    def test_the_strict_refusals_are_not_transient_and_are_not_retried(self, mock_sleep):
+        """A malformed envelope is a server contract violation, not a blip.
+
+        The refusal is raised in the pagination loop, outside the retried request, and it must stay there: retrying four times would quadruple the wait before a failure whose cause cannot change between attempts.
+        """
+        from notion_ops.exceptions import NotionOpsError
+        from notion_ops.utils.publish import _list_children_blocks
+
+        class _Children:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def list(self, *, block_id, page_size=100, start_cursor=None):
+                self.calls += 1
+                return {"results": [{"id": "blk-0"}], "has_more": True, "next_cursor": None}
+
+        children = _Children()
+
+        class _Blocks:
+            pass
+
+        _Blocks.children = children
+
+        class _API:
+            blocks = _Blocks()
+
+        class _Client:
+            api = _API()
+
+        with pytest.raises(NotionOpsError) as caught:
+            _list_children_blocks(_Client(), "page-x", strict=True)
+        assert caught.value.code == "malformed_response"
+        assert children.calls == 1
+        assert mock_sleep.call_args_list == []
+
 
 # ---------------------------------------------------------------------------
 # _is_already_gone — each 404 detection branch bound individually (Step-4 S1)
@@ -712,7 +895,19 @@ class TestConvergenceAfterInterrupt:
         assert bodies == ["new0"]
 
     def test_list_and_delete_are_retry_wrapped(self, monkeypatch):
-        """A single transient 503 on list + delete is absorbed (retry_on_transient)."""
+        """A single transient 503 on list + delete is absorbed.
+
+        The two arms are wrapped by different decorators, and deliberately so.
+        `delete` is still `retry_on_transient`, whose `_should_retry` matches on the
+        message, so its arm raises the message-shaped error it always did. `list`
+        moved to `retry_on_transient_api` in rev6 (hostile-42/contract-32), whose
+        predicate reads the status off the error object — so its arm now raises the
+        shape notion-client actually produces. That is not a narrowing in practice:
+        `Client.request` catches every `httpx.HTTPStatusError` and re-raises it
+        through `build_request_error`, which returns an `HTTPResponseError` carrying
+        `.status`, so a real 503 from this endpoint has never arrived as a bare
+        `RuntimeError` with a number in its text.
+        """
         import notion_ops.utils.retry as retry_mod
 
         monkeypatch.setattr(retry_mod.time, "sleep", lambda *_: None)
@@ -729,7 +924,13 @@ class TestConvergenceAfterInterrupt:
                 def flaky_list(**kw):
                     if not self._list_failed:
                         self._list_failed = True
-                        raise RuntimeError("HTTP 503 service unavailable")
+                        raise APIResponseError(
+                            code=APIErrorCode.ServiceUnavailable,
+                            status=503,
+                            message="Notion is unavailable.",
+                            headers=Headers({}),
+                            raw_body_text='{"object":"error","code":"service_unavailable"}',
+                        )
                     return real_list(**kw)
 
                 def flaky_delete(**kw):
