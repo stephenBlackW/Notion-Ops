@@ -137,14 +137,19 @@ class IncompleteSnapshotError(NotionOpsError):
     mode, move the offending blocks by hand, or accept the loss by some route that
     says so out loud).
 
-    Two conditions raise it:
+    Three conditions raise it, in the order the copy meets them:
 
+    - the read of the old body came back **truncated or unusable** — a page of
+      children reporting ``has_more`` with no cursor to follow it with, or an
+      envelope that is not a listing at all. A short listing is *unknown*, not
+      *empty*, and this is the one caller that must never round unknown down: it
+      is about to delete the only other copy (nops-cycle-3 rev4, hostile-22);
     - the source carries a block type the API cannot re-create from its own
       payload — ``child_page``, ``child_database``, ``synced_block``,
-      ``unsupported``, ``ai_block``. These matter more than the missing content:
-      deleting a ``child_page`` block trashes the child page and deleting a
-      ``child_database`` block trashes the database, and a hub page is precisely
-      the page shape that holds them;
+      ``unsupported``, ``ai_block``, or a block with no usable ``type`` at all.
+      These matter more than the missing content: deleting a ``child_page`` block
+      trashes the child page and deleting a ``child_database`` block trashes the
+      database, and a hub page is precisely the page shape that holds them;
     - the snapshot's own publish came back ``partial``, i.e. some nested content
       never landed on the snapshot.
 

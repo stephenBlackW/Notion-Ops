@@ -33,7 +33,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from notion_ops.exceptions import DestructiveRepublishError
+from notion_ops.exceptions import DestructiveRepublishError, NotionOpsError
 from notion_ops.operations.comments import list_discussions
 from notion_ops.utils.ids import extract_notion_id
 from notion_ops.utils.markdown import (
@@ -555,34 +555,93 @@ class RepublishResult(PublishResult):
     deleted_count: int = 0
 
 
-def _list_children_blocks(client: Any, block_id: str) -> list[dict[str, Any]]:
+def _list_children_blocks(
+    client: Any,
+    block_id: str,
+    *,
+    strict: bool = False,
+) -> list[dict[str, Any]]:
     """List the full top-level child block dicts currently under *block_id*.
 
     Paginated and retry-wrapped, matching :func:`execute_plan`'s use of the raw
     SDK (``client.api``) so the publisher stays decoupled from the operations
     layer. Returns the API block dicts (id + type + body + ``has_children``),
     which the minimal-write diff needs to compare existing content.
+
+    **One reader, two callers, two opposite conservative directions.** By default
+    a malformed envelope — ``has_more`` with no cursor to follow it with, a
+    response that is not a JSON object, ``results`` that is not a list — is logged
+    or substituted and what was read so far is returned. That is the safe
+    direction for this module's own two call sites, which use the listing to
+    decide what to **delete**: a listing that came back short under-deletes.
+
+    It is the opposite of safe for
+    :func:`~notion_ops.utils.revise._copy_page_body`, where a listing that came
+    back short becomes a *snapshot* that came back short and the destructive
+    rewrite then deletes the original anyway. ``strict=True`` refuses there
+    instead, by the same rule and in the same words
+    :func:`~notion_ops.operations.comments._next_cursor` uses: a truncated
+    listing is *unknown*, not *empty*, and the caller that is about to destroy
+    the only other copy must never round unknown down (nops-cycle-3 rev4,
+    hostile-22).
+
+    Args:
+        client: A duck-typed client exposing ``client.api``.
+        block_id: The block or page whose children to list.
+        strict: Raise :class:`~notion_ops.exceptions.NotionOpsError` (code
+            ``malformed_response``) rather than returning a listing that cannot
+            be shown to be complete. Defaults to ``False``, which is exactly the
+            behaviour every caller had before the keyword existed.
+
+    Raises:
+        NotionOpsError: Only when *strict*, and only on a listing whose
+            completeness cannot be established.
     """
 
     @retry_on_transient
-    def _list(bid: str, cursor: str | None) -> dict[str, Any]:
+    def _list(bid: str, cursor: str | None) -> Any:
         params: dict[str, Any] = {"block_id": bid, "page_size": 100}
         if cursor:
             params["start_cursor"] = cursor
-        result = client.api.blocks.children.list(**params)
-        return result if isinstance(result, dict) else {}
+        return client.api.blocks.children.list(**params)
+
+    def _unusable(what: str) -> NotionOpsError:
+        return NotionOpsError(
+            f"blocks.children.list returned {what} for {block_id}: the child "
+            f"listing is unusable, and treating it as an empty listing would "
+            f"report a page with nothing on it",
+            code="malformed_response",
+        )
 
     blocks: list[dict[str, Any]] = []
     cursor: str | None = None
     while True:
-        response = _list(block_id, cursor)
-        for block in response.get("results", []) or []:
+        raw = _list(block_id, cursor)
+        if not isinstance(raw, dict):
+            if strict:
+                raise _unusable(f"a {type(raw).__name__} rather than a list envelope")
+            raw = {}
+        response: dict[str, Any] = raw
+        results = response.get("results")
+        if strict and not isinstance(results, list):
+            raise _unusable("an envelope with no usable 'results'")
+        for block in results or []:
+            if strict and not isinstance(block, dict):
+                raise _unusable(f"a {type(block).__name__} where a block object belongs")
             if block.get("id"):
                 blocks.append(block)
         if not response.get("has_more"):
             break
         cursor = response.get("next_cursor")
         if not cursor:
+            if strict:
+                raise NotionOpsError(
+                    f"blocks.children.list reported has_more=True but returned no "
+                    f"next_cursor for {block_id}: the child listing is truncated, "
+                    f"and what was read so far cannot be reported as the whole "
+                    f"page",
+                    code="malformed_response",
+                )
             logger.warning(
                 "blocks.children.list reported has_more=True but returned no "
                 "next_cursor for %s; stopping pagination. The child listing may "

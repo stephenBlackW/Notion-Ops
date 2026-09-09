@@ -21,6 +21,7 @@ What these tests hold it to:
 from __future__ import annotations
 
 import copy
+from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
 
@@ -31,6 +32,7 @@ from notion_ops.utils.ids import extract_notion_id
 from notion_ops.utils.publish import _children_of, _without_children
 from notion_ops.utils.revise import (
     _UNCOPYABLE_BLOCK_TYPES,
+    _UNTYPED_BLOCK,
     NEW_CANONICAL,
     SNAPSHOT_IN_PLACE,
     RevisionResult,
@@ -178,8 +180,15 @@ class ReviseFakeClient:
         comments: list[dict[str, Any]] | None = None,
         parent: dict[str, Any] | None = None,
         drop_append_ids: bool = False,
+        children_envelope: Callable[[str, dict[str, Any], int], Any] | None = None,
     ) -> None:
         self.drop_append_ids = drop_append_ids
+        #: Rewrites the well-formed envelope ``blocks.children.list`` would have
+        #: returned, so a test can express a *malformed* one — the shape a server
+        #: contract violation actually arrives in. Called with the block id, the
+        #: envelope, and which children read this is (1-based).
+        self.children_envelope = children_envelope
+        self._children_reads = 0
         self.calls: list[tuple[str, str]] = []
         self.updates: list[tuple[str, dict[str, Any]]] = []
         self.creates: list[dict[str, Any]] = []
@@ -266,14 +275,20 @@ class ReviseFakeClient:
                 block_id: str,
                 page_size: int = 100,
                 start_cursor: str | None = None,
-            ) -> dict[str, Any]:
+            ) -> Any:
                 client.calls.append(("blocks.list", block_id))
+                client._children_reads += 1
                 kids = client._children.get(block_id, [])
-                return {
+                envelope: dict[str, Any] = {
                     "results": [client._apiify(i) for i in kids],
                     "has_more": False,
                     "next_cursor": None,
                 }
+                if client.children_envelope is None:
+                    return envelope
+                return client.children_envelope(
+                    block_id, envelope, client._children_reads
+                )
 
         class _Blocks:
             children = _Children()
@@ -408,6 +423,47 @@ class ReviseFakeClient:
                 if isinstance(value, dict) and "relation" in value:
                     out.append((pid, name, [r["id"] for r in value["relation"]]))
         return out
+
+
+def _malform_the_first_hub_read(
+    shape: str,
+    *,
+    keep: int = 0,
+) -> Callable[[str, dict[str, Any], int], Any]:
+    """A ``children_envelope`` hook that malforms the FIRST read of the hub page.
+
+    Only the first read, because that is what makes the loss total: the snapshot
+    copy sees part of the body while the republish's own diff read, one call
+    later, sees all of it and deletes all of it. A hook that malformed every read
+    would leave the rewrite under-deleting too, and would understate the damage.
+
+    Shapes, all of them things a server can hand back:
+
+    - ``truncated`` — ``has_more: true`` with no ``next_cursor``, keeping *keep*
+      of the results (``keep=0`` is the truncated-to-empty variant, hostile-5's
+      scenario transplanted onto the destructive path);
+    - ``non-dict`` — not a JSON object at all;
+    - ``results-not-a-list`` — an envelope whose ``results`` is not a list.
+    """
+    state = {"spent": False}
+
+    def hook(block_id: str, envelope: dict[str, Any], nth: int) -> Any:
+        if block_id != SOURCE_ID or state["spent"]:
+            return envelope
+        state["spent"] = True
+        if shape == "truncated":
+            return {
+                "results": envelope["results"][:keep],
+                "has_more": True,
+                "next_cursor": None,
+            }
+        if shape == "non-dict":
+            return None
+        if shape == "results-not-a-list":
+            return {"results": "hub block 1", "has_more": False, "next_cursor": None}
+        raise AssertionError(f"unknown malformed shape {shape!r}")
+
+    return hook
 
 
 def _comment(cid: str, text: str, *, block_id: str | None = None) -> dict[str, Any]:
@@ -1159,6 +1215,134 @@ class TestSnapshotInPlace:
         assert client.text_of(SOURCE_ID) == before_text
         assert client.updates == []
         assert client.creates == []
+
+    @pytest.mark.parametrize(
+        "shape, keep, hub_blocks, phrase",
+        [
+            ("truncated", 2, 5, "next_cursor"),
+            ("truncated", 0, 3, "next_cursor"),
+            ("non-dict", 0, 3, "rather than a list envelope"),
+            ("results-not-a-list", 0, 3, "no usable 'results'"),
+        ],
+        ids=[
+            "truncated-with-content",
+            "truncated-to-empty",
+            "non-dict-envelope",
+            "results-not-a-list",
+        ],
+    )
+    def test_a_malformed_children_read_refuses_before_anything_is_written(
+        self, shape, keep, hub_blocks, phrase
+    ):
+        """hostile-22: the copy this mode destroys the original on the strength of.
+
+        `_list_children_blocks` used to warn and stop on a `has_more`-without-
+        `next_cursor` envelope and to substitute `{}` for a non-dict one, so the
+        snapshot silently carried part of the body — or none of it — and the
+        `allow_destructive=True` rewrite then deleted the whole body at source.
+        Executed against this fixture before the fix: five hub blocks in, two on
+        the snapshot, one `replacement` block on the hub, `content_error=None`.
+
+        The truncated-to-empty case is the one that matters: it is hostile-5's
+        scenario (fixed in rev2 for the comments reader, which answers "is anyone
+        talking about this page") transplanted onto the reader that answers "what
+        is on this page before I delete it", where the consequence is not a wrong
+        guard verdict but destroyed content.
+
+        A truncated listing is *unknown*, not *empty*. Each shape must therefore
+        reach the refusal that already sits before `_create_page`, leaving the hub
+        page byte-for-byte as it was.
+        """
+        client = ReviseFakeClient(
+            properties={"Name": _title_prop("Package Hub"), "Previous": _relation()},
+            blocks=[_para(f"hub block {i + 1}") for i in range(hub_blocks)],
+            children_envelope=_malform_the_first_hub_read(shape, keep=keep),
+        )
+        before_ids = client.block_ids(SOURCE_ID)
+        before_text = client.text_of(SOURCE_ID)
+
+        with pytest.raises(IncompleteSnapshotError) as caught:
+            revise_page(
+                client,
+                SOURCE,
+                new_markdown="replacement",
+                schema=ATOMS_LIKE,
+                mode=SNAPSHOT_IN_PLACE,
+            )
+
+        # The refusal names the truncation rather than the block types, so the
+        # caller can tell "I cannot copy this" from "I could not read this".
+        assert phrase in str(caught.value)
+        assert caught.value.page_id == SOURCE_ID
+        assert caught.value.block_types == ()
+        # Nothing was created, so there is not even a half-snapshot to clean up.
+        assert caught.value.snapshot_page_id is None
+
+        # Zero writes of any kind, and the hub page is exactly as it was.
+        assert [c for c in client.calls if c[0] in _WRITE_CALLS] == []
+        assert client.block_ids(SOURCE_ID) == before_ids
+        assert client.text_of(SOURCE_ID) == before_text
+        assert client.creates == []
+        assert client.updates == []
+
+    def test_an_untyped_block_refuses_like_any_other_uncopyable_one(self):
+        """hostile-39: a block the sanitizer cannot classify must not just vanish.
+
+        `_sanitize_block` returned `None` for a block with no `type` *without*
+        recording anything in `skipped`, so the uncopyable refusal could not fire
+        and the rewrite deleted the block at source. An unclassifiable block is
+        the one case where the library has least idea what it is destroying, so it
+        is the last case that should be handled by dropping it silently.
+        """
+        client = ReviseFakeClient(
+            properties={"Name": _title_prop("Package Hub"), "Previous": _relation()},
+            blocks=[_para("hub body"), {"object": "block"}],
+        )
+        before_ids = client.block_ids(SOURCE_ID)
+
+        with pytest.raises(IncompleteSnapshotError) as caught:
+            revise_page(
+                client,
+                SOURCE,
+                new_markdown="replacement",
+                schema=ATOMS_LIKE,
+                mode=SNAPSHOT_IN_PLACE,
+            )
+
+        assert caught.value.block_types == (_UNTYPED_BLOCK,)
+        assert _UNTYPED_BLOCK in str(caught.value)
+        assert caught.value.snapshot_page_id is None
+        assert [c for c in client.calls if c[0] in _WRITE_CALLS] == []
+        assert client.block_ids(SOURCE_ID) == before_ids
+
+    def test_a_genuinely_empty_hub_page_snapshots_without_a_refusal(self):
+        """hostile-23: `if snapshot_body:` is gone, and an empty read is a fact now.
+
+        The short-circuit was defensible only if an empty read always meant an
+        empty page — which is precisely what hostile-22 showed it did not. With
+        the reader strict, an empty body reaching the publish means the source
+        genuinely has none, so the publish is unconditional (the same argument
+        rev2 used to delete `if blocks:` from the successor path) and the
+        revision proceeds normally.
+        """
+        client = ReviseFakeClient(
+            properties={"Name": _title_prop("Package Hub"), "Previous": _relation()},
+            blocks=[],
+        )
+
+        result = revise_page(
+            client,
+            SOURCE,
+            new_markdown="replacement",
+            schema=ATOMS_LIKE,
+            mode=SNAPSHOT_IN_PLACE,
+            capture_transcript=False,
+        )
+
+        assert result.canonical_page_id == SOURCE_ID
+        assert result.content_error is None
+        assert client.text_of(result.archived_page_id) == []
+        assert client.text_of(SOURCE_ID) == ["replacement"]
 
     def test_a_partial_snapshot_publish_stops_before_the_rewrite(self):
         """D-5's own ordering principle: check before the irreversible write.

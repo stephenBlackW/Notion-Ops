@@ -487,6 +487,13 @@ _UNCOPYABLE_BLOCK_TYPES = frozenset(
     {"child_page", "child_database", "unsupported", "synced_block", "ai_block"}
 )
 
+#: What an unclassifiable block is called in a refusal. A block whose ``type`` is
+#: missing, empty or not a string has no name of its own to report, and it used to
+#: be dropped from the copy without being recorded — so the refusal could not fire
+#: and the rewrite deleted it at source. A block the library cannot identify is the
+#: one it knows least about destroying (nops-cycle-3 rev4, hostile-39).
+_UNTYPED_BLOCK = "<untyped>"
+
 
 def _sanitize_rich_text(spans: Any) -> list[Any]:
     """Strip the API-only fields (``plain_text``, ``href``) off a rich-text array."""
@@ -504,12 +511,13 @@ def _sanitize_block(block: dict[str, Any], skipped: set[str]) -> dict[str, Any] 
 
     Returns ``None`` for a block type the API cannot re-create from its own
     payload; the type is recorded in *skipped* so the caller can say what did not
-    make it onto the snapshot.
+    make it onto the snapshot. A block with no usable ``type`` at all is recorded
+    too, under :data:`_UNTYPED_BLOCK`, so that it refuses by the same path instead
+    of vanishing from the copy while the rewrite deletes it at source.
     """
     btype = block.get("type", "")
-    if not btype or btype in _UNCOPYABLE_BLOCK_TYPES:
-        if btype:
-            skipped.add(btype)
+    if not isinstance(btype, str) or not btype or btype in _UNCOPYABLE_BLOCK_TYPES:
+        skipped.add(btype if isinstance(btype, str) and btype else _UNTYPED_BLOCK)
         return None
     body = block.get(btype)
     if not isinstance(body, dict):
@@ -534,8 +542,21 @@ def _copy_page_body(
     requests: _Requests,
     skipped: set[str],
 ) -> list[dict[str, Any]]:
-    """Read *page_id*'s block tree and return a re-publishable copy of it."""
-    children = _list_children_blocks(client, page_id)
+    """Read *page_id*'s block tree and return a re-publishable copy of it.
+
+    The read is **strict** at every level. This copy is the only thing that will
+    still hold the old body once the caller rewrites the source, so a listing that
+    cannot be shown to be complete has to arrive as a failure rather than as a
+    shorter list: ``_list_children_blocks``'s default logs the truncation and
+    returns what it got, which is right for a caller deciding what to delete and
+    exactly wrong for this one (nops-cycle-3 rev4, hostile-22).
+
+    Raises:
+        NotionOpsError: code ``malformed_response``, when any page of any level of
+            the tree came back truncated or unusable. The caller folds this into
+            its own refusal, before the first write.
+    """
+    children = _list_children_blocks(client, page_id, strict=True)
     requests.bump()
     copied: list[dict[str, Any]] = []
     for block in children:
@@ -845,7 +866,20 @@ def _revise_snapshot_in_place(
         discussions = _read_transcript(client, source_id, requests)
 
     skipped_types: set[str] = set()
-    old_body = _copy_page_body(client, source_id, requests, skipped_types)
+    try:
+        old_body = _copy_page_body(client, source_id, requests, skipped_types)
+    except NotionOpsError as e:
+        if e.code != "malformed_response":
+            raise
+        # Same refusal, one rung earlier in the same read: a copy that is not
+        # provably complete cannot justify the rewrite any more than a copy that is
+        # provably incomplete can. Nothing has been written, so nothing is left
+        # behind — the caller retries when the workspace answers properly.
+        raise IncompleteSnapshotError(
+            source_id,
+            f"the old body could not be read in full, so the copy cannot be shown "
+            f"to be complete ({e})",
+        ) from e
     if skipped_types:
         # Before the first write of any kind, including the snapshot page itself:
         # a refusal that has already created something is a mess the caller has to
@@ -866,21 +900,27 @@ def _revise_snapshot_in_place(
     snapshot_id = extract_notion_id(str(snapshot.get("id", "")))
 
     notes: list[str] = []
+    # Published unconditionally. The guard that used to stand here (`if
+    # snapshot_body:`) is the same `if <content>:` short-circuit rev2 deleted from
+    # the successor path, left on the branch where the consequence is deletion
+    # rather than a cosmetic empty page — and it was defensible only if an empty
+    # read always meant an empty page, which is what hostile-22 showed it did not.
+    # With the read strict, an empty body reaching here means the source genuinely
+    # has none, and publishing nothing costs nothing.
     snapshot_body = old_body + _transcript_blocks(discussions)
-    if snapshot_body:
-        published = publish_block_tree(client, snapshot_id, snapshot_body)
-        requests.bump(published.request_count)
-        if published.partial:
-            # D-5's ordering principle, applied to the last thing that can still
-            # be checked: an incomplete snapshot cannot justify the rewrite, and
-            # the rewrite is the irreversible step. The snapshot page stays where
-            # it is — naming it beats deleting it.
-            raise IncompleteSnapshotError(
-                source_id,
-                f"{published.skipped_followups} nested append(s) were skipped while "
-                f"publishing the snapshot, so part of the old body never reached it",
-                snapshot_page_id=snapshot_id,
-            )
+    published = publish_block_tree(client, snapshot_id, snapshot_body)
+    requests.bump(published.request_count)
+    if published.partial:
+        # D-5's ordering principle, applied to the last thing that can still
+        # be checked: an incomplete snapshot cannot justify the rewrite, and
+        # the rewrite is the irreversible step. The snapshot page stays where
+        # it is — naming it beats deleting it.
+        raise IncompleteSnapshotError(
+            source_id,
+            f"{published.skipped_followups} nested append(s) were skipped while "
+            f"publishing the snapshot, so part of the old body never reached it",
+            snapshot_page_id=snapshot_id,
+        )
 
     # The only legitimate in-library use of the override: this rewrite is exactly
     # what the guard exists to stop by accident, and exactly what this mode is

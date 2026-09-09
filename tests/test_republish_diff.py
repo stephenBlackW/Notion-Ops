@@ -469,6 +469,58 @@ class TestListingAndCounts:
         assert [b["id"] for b in blocks] == ["blk-0"]
         assert any("next_cursor" in r.message for r in caplog.records)
 
+    def test_strict_turns_the_same_envelopes_into_a_refusal(self):
+        """`strict=True` is what the snapshot copy reads with (nops-cycle-3 rev4).
+
+        The default above is the republish diff's contract and must not change:
+        under-deleting on a truncated listing is conservative there, because the
+        blocks that were not listed are simply not deleted. It is the *opposite*
+        of conservative in `revise.py::_copy_page_body`, where a listing that came
+        back short becomes a snapshot that came back short and the rewrite then
+        deletes the original anyway. Same reader, two callers, two right answers —
+        so the caller says which, and the default keeps this file's other two call
+        sites (`execute_plan`'s deferred follow-ups and `republish_block_tree`'s
+        diff) byte-for-byte as they were.
+        """
+        from notion_ops.exceptions import NotionOpsError
+        from notion_ops.utils.publish import _list_children_blocks
+
+        def _client(envelope):
+            class _Children:
+                def list(self, *, block_id, page_size=100, start_cursor=None):
+                    return envelope
+
+            class _Blocks:
+                children = _Children()
+
+            class _API:
+                blocks = _Blocks()
+
+            class _Client:
+                api = _API()
+
+            return _Client()
+
+        truncated = {"results": [{"id": "blk-0"}], "has_more": True, "next_cursor": None}
+        # Default: warns, keeps what it read, and the two pre-existing call sites
+        # behave exactly as they did before the keyword existed.
+        assert [b["id"] for b in _list_children_blocks(_client(truncated), "page-x")] == [
+            "blk-0"
+        ]
+        assert _list_children_blocks(_client(None), "page-x") == []
+        assert _list_children_blocks(_client({"has_more": False}), "page-x") == []
+
+        # Strict: each of the three is unknown, and unknown is not empty.
+        for envelope, phrase in [
+            (truncated, "next_cursor"),
+            (None, "rather than a list envelope"),
+            ({"has_more": False}, "no usable 'results'"),
+        ]:
+            with pytest.raises(NotionOpsError) as caught:
+                _list_children_blocks(_client(envelope), "page-x", strict=True)
+            assert phrase in str(caught.value)
+            assert caught.value.code == "malformed_response"
+
 
 # ---------------------------------------------------------------------------
 # _is_already_gone — each 404 detection branch bound individually (Step-4 S1)
