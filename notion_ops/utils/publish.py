@@ -29,6 +29,7 @@ import hashlib
 import json
 import logging
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -792,6 +793,9 @@ def republish_block_tree(
     client: Any,
     parent_id: str,
     blocks: list[dict[str, Any]],
+    *,
+    allow_destructive: bool = False,
+    protected: Callable[[str], bool] | None = None,
     **kwargs: Any,
 ) -> RepublishResult:
     """Idempotently (re)publish *blocks* under *parent_id* with a minimal-write diff.
@@ -864,9 +868,21 @@ def republish_markdown(
     client: Any,
     parent_id: str,
     markdown: str,
+    *,
+    allow_destructive: bool = False,
+    protected: Callable[[str], bool] | None = None,
     **kwargs: Any,
 ) -> RepublishResult:
-    """Convert *markdown* to blocks and idempotently republish under *parent_id*."""
+    """Convert *markdown* to blocks and idempotently republish under *parent_id*.
+
+    ``allow_destructive`` and ``protected`` are forwarded to
+    :func:`republish_block_tree`; see its docstring for the guard's contract.
+    """
     return republish_block_tree(
-        client, parent_id, markdown_to_blocks(markdown), **kwargs
+        client,
+        parent_id,
+        markdown_to_blocks(markdown),
+        allow_destructive=allow_destructive,
+        protected=protected,
+        **kwargs,
     )

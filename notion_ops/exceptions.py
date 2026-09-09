@@ -87,6 +87,44 @@ class OversizedContentError(NotionOpsError):
         self.preview = preview
 
 
+class DestructiveRepublishError(NotionOpsError):
+    """Raised when a destructive republish targets a page it must not destroy.
+
+    ``republish_block_tree`` converges a page's blocks by deleting the ones that
+    changed, which permanently detaches every comment anchored to them — the
+    Notion API cannot move or re-anchor a comment (ISS-029). So a republish that
+    *would write* refuses by default when the page carries an open discussion, or
+    when the caller's own ``protected`` predicate flags it.
+
+    The message names the page, the trigger and the discussion count, and
+    deliberately carries **no comment text and no client attribute** — a refusal
+    is not a place to leak either.
+
+    Args:
+        page_id: The page the republish targeted.
+        trigger: ``"discussion"`` or ``"protected"``.
+        discussion_count: Open comments found. ``0`` for a ``protected`` refusal,
+            which does not consult the comments endpoint.
+    """
+
+    def __init__(self, page_id: str, trigger: str, discussion_count: int = 0):
+        if trigger == "discussion":
+            why = (
+                f"it carries {discussion_count} open discussion "
+                f"comment(s), whose anchors a republish would destroy"
+            )
+        else:
+            why = "the caller's protected predicate flags it"
+        message = (
+            f"Refusing to republish {page_id}: {why}. "
+            f"Revise it as a new version instead (notion_ops.revise_page), or "
+            f"pass allow_destructive=True to overwrite it anyway."
+        )
+        super().__init__(message, code="destructive_republish")
+        self.page_id = page_id
+        self.trigger = trigger
+        self.discussion_count = discussion_count
+
 
 def map_api_error(
     error: APIResponseError,

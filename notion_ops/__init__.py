@@ -8,6 +8,7 @@ from notion_ops.client import AsyncNotionOps, NotionOps
 from notion_ops.exceptions import (
     AuthenticationError,
     ConflictError,
+    DestructiveRepublishError,
     NotFoundError,
     NotionOpsError,
     PermissionError,
@@ -49,6 +50,7 @@ from notion_ops.utils.publish import (
     republish_markdown,
 )
 from notion_ops.utils.repair import blocks_to_markdown, repair_blocks
+from notion_ops.utils.revise import RevisionResult, RevisionSchema, revise_page
 
 __version__ = "0.1.0"
 
@@ -93,6 +95,7 @@ __all__ = [
     "PermissionError",
     "RateLimitError",
     "ConflictError",
+    "DestructiveRepublishError",
     # Templates
     "PageTemplate",
     # Utilities
@@ -108,4 +111,8 @@ __all__ = [
     "republish_block_tree",
     "republish_markdown",
     "RepublishResult",
+    # Versioned revision (ISS-029) — change a page without destroying its discussion
+    "revise_page",
+    "RevisionSchema",
+    "RevisionResult",
 ]
