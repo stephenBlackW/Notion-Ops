@@ -3,7 +3,9 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from httpx import HTTPStatusError, Request, Response
+from httpx import Headers, HTTPStatusError, Request, Response
+from notion_client import APIResponseError
+from notion_client.errors import APIErrorCode
 
 from notion_ops.exceptions import RateLimitError
 from notion_ops.utils.retry import (
@@ -11,6 +13,7 @@ from notion_ops.utils.retry import (
     _get_retry_delay,
     _should_retry,
     retry_on_transient,
+    retry_on_transient_api,
     retry_on_transient_async,
 )
 
@@ -27,6 +30,21 @@ def _make_http_status_error(status_code, headers=None):
         message=f"{status_code} Error",
         request=request,
         response=response,
+    )
+
+
+def _rate_limited(retry_after: str | None = None) -> APIResponseError:
+    """A raw SDK 429, the shape that reaches the retry wrapper after rev2.
+
+    rev2 moved the mapping OUTSIDE the wrapper (contract-5), so what the wrapper
+    now sees on a rate limit is this, not a ``RateLimitError``.
+    """
+    return APIResponseError(
+        code=APIErrorCode.RateLimited,
+        status=429,
+        message="Rate limited",
+        headers=Headers({"Retry-After": retry_after} if retry_after else {}),
+        raw_body_text='{"object":"error","code":"rate_limited"}',
     )
 
 
@@ -118,6 +136,62 @@ class TestGetRetryDelay:
         err = _make_http_status_error(429, headers={"Retry-After": "0.5"})
         delay = _get_retry_delay(0, err)
         assert delay == 2.0  # BASE_DELAY
+
+
+class TestRawSdkRetryAfter:
+    """contract-21: the reorder must not cost the server's own wait interval.
+
+    rev2 moved the mapping outside the retry wrapper so that a Notion 503 is
+    retried four times instead of one. The predicate is not the only thing that
+    reads the exception, though: `_get_retry_delay` reads it too, and it knew how
+    to find `Retry-After` only on a `RateLimitError` (which `map_api_error`
+    populates) or an `httpx.HTTPStatusError`. A raw `APIResponseError` carries the
+    header in `.headers` and neither branch looked there, so on the ONE status
+    where Notion says exactly how long to wait, the new order stopped listening --
+    measured by the contract seat as [2, 4, 8] where the round-1 order slept
+    [30, 30, 30].
+    """
+
+    def test_a_raw_sdk_429_uses_the_servers_retry_after(self):
+        assert _get_retry_delay(0, _rate_limited("30")) == 30.0
+        # The exponential backoff is what the attempt number would have given.
+        assert _get_retry_delay(2, _rate_limited("30")) == 30.0
+
+    def test_the_header_is_floored_at_base_delay_like_every_other_source(self):
+        assert _get_retry_delay(0, _rate_limited("0.5")) == 2.0
+
+    def test_an_unparseable_or_absent_header_falls_back_to_exponential(self):
+        assert _get_retry_delay(1, _rate_limited("soon")) == 4.0
+        assert _get_retry_delay(1, _rate_limited()) == 4.0
+
+    def test_a_transient_5xx_is_unaffected_and_stays_exponential(self):
+        five_oh_three = APIResponseError(
+            code=APIErrorCode.ServiceUnavailable,
+            status=503,
+            message="Notion is unavailable.",
+            headers=Headers({"Retry-After": "30"}),
+            raw_body_text='{"object":"error","code":"service_unavailable"}',
+        )
+        # Notion does not send Retry-After on a 503, and the rule is 429-only:
+        # honouring it here would change a documented backoff on a header nobody
+        # sends.
+        assert _get_retry_delay(0, five_oh_three) == 2.0
+
+    @patch("notion_ops.utils.retry.time.sleep")
+    def test_the_wrapper_sleeps_the_server_specified_interval(self, mock_sleep):
+        """End to end through the decorator the revision helpers actually use."""
+        calls = {"n": 0}
+
+        @retry_on_transient_api
+        def rate_limited():
+            calls["n"] += 1
+            if calls["n"] < MAX_ATTEMPTS:
+                raise _rate_limited("30")
+            return "recovered"
+
+        assert rate_limited() == "recovered"
+        assert calls["n"] == MAX_ATTEMPTS
+        assert [c.args[0] for c in mock_sleep.call_args_list] == [30.0, 30.0, 30.0]
 
 
 class TestRetryOnTransient:

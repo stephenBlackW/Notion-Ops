@@ -74,6 +74,21 @@ def _get_retry_delay(attempt: int, exception: Exception) -> float:
             except ValueError:
                 pass
 
+    # A RAW SDK 429, which is what reaches here now that the mapping happens
+    # outside the retry wrapper (contract-5): the header is on the error object
+    # itself rather than on a `.response`, and neither branch above looks there.
+    # Notion's rate-limit guidance is that `Retry-After` is to be honoured, and
+    # 2/4/8 against a server asking for 30 is four rejected attempts and a failure
+    # in the middle of a revision (nops-cycle-3 rev4, contract-21).
+    if getattr(exception, "status", None) == 429:
+        headers = getattr(exception, "headers", None)
+        raw = headers.get("Retry-After") if headers is not None else None
+        if raw:
+            try:
+                return float(max(float(raw), BASE_DELAY))
+            except (TypeError, ValueError):
+                pass
+
     # Exponential backoff: 2^attempt * BASE_DELAY
     delay = BASE_DELAY * (2**attempt)
     return float(min(delay, MAX_DELAY))
@@ -229,6 +244,11 @@ def retry_on_transient_api(func: Callable[..., T]) -> Callable[..., T]:
     the other way around: a mapped 503 is a bare ``NotionOpsError`` carrying
     Notion's body text, which :func:`_should_retry` cannot recognise, so mapping
     inside the retry wrapper turns four attempts into one (contract-5, measured).
+
+    A 429 handled this way still waits the interval the server asked for:
+    :func:`_get_retry_delay` reads ``Retry-After`` off the raw SDK error's own
+    ``.headers``, not only off the mapped :class:`RateLimitError` the old order
+    produced (contract-21).
 
     Example:
         @retry_on_transient_api
