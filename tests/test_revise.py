@@ -30,6 +30,7 @@ from notion_ops.exceptions import IncompleteSnapshotError
 from notion_ops.utils.ids import extract_notion_id
 from notion_ops.utils.publish import _children_of, _without_children
 from notion_ops.utils.revise import (
+    _UNCOPYABLE_BLOCK_TYPES,
     NEW_CANONICAL,
     SNAPSHOT_IN_PLACE,
     RevisionResult,
@@ -87,17 +88,25 @@ def _toggle(text: str, children: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _child_page(title: str) -> dict[str, Any]:
-    """A block the API returns and cannot re-create: deleting it TRASHES the page."""
-    return {"object": "block", "type": "child_page", "child_page": {"title": title}}
+#: Plausible bodies for the uncopyable types that carry one. This is a table of
+#: *shapes*, not a second copy of the membership list -- which types are
+#: uncopyable is read from `_UNCOPYABLE_BLOCK_TYPES` itself, and a type absent
+#: here still builds, with an empty body.
+_UNCOPYABLE_BODIES = {
+    "child_page": {"title": "Sub-page"},
+    "child_database": {"title": "Sub-db"},
+    "synced_block": {"synced_from": {"type": "block_id", "block_id": "blk-elsewhere"}},
+}
 
 
-def _child_database(title: str) -> dict[str, Any]:
-    return {
-        "object": "block",
-        "type": "child_database",
-        "child_database": {"title": title},
-    }
+def _uncopyable(btype: str) -> dict[str, Any]:
+    """A block of *btype* in the shape the API returns it.
+
+    The body is decoration: `_sanitize_block` refuses on the *type*, before it
+    reads anything else, which is the whole reason a type the API cannot
+    re-create is unsafe to snapshot around.
+    """
+    return {"object": "block", "type": btype, btype: _UNCOPYABLE_BODIES.get(btype, {})}
 
 
 def _title_prop(text: str) -> dict[str, Any]:
@@ -903,6 +912,47 @@ class TestVersionChainSnapshotInPlace:
         # The hub keeps its id and carries only the newest content.
         assert client.text_of(SOURCE_ID) == ["replacement 4"]
 
+    def test_a_truncated_predecessor_relation_refuses_before_any_write(self):
+        """The arm guarding the array snapshot mode actually merges into.
+
+        Snapshot mode read-modify-writes the hub's `Previous`, and a page object
+        caps a relation at 25 entries and flags the rest with `has_more`. A hub
+        whose history has passed the cap therefore arrives already truncated, and
+        merging into what came back would write that truncation over the real
+        array — through the dual inverse, unlinking every snapshot past the cap at
+        both ends, which is the exact loss `_merged_relation` was added to prevent.
+
+        The sibling test in `TestVersionChainNewCanonical` truncates `Next` in
+        new-canonical mode and so exercises the other arm only.
+        """
+        client = ReviseFakeClient(
+            properties={
+                "Name": _title_prop("Package Hub"),
+                "Previous": _relation("older-snapshot", has_more=True),
+            },
+            blocks=[_para("hub body")],
+        )
+
+        with pytest.raises(ValueError, match="truncated") as caught:
+            revise_page(
+                client,
+                SOURCE,
+                new_markdown="replacement",
+                schema=ATOMS_LIKE,
+                mode=SNAPSHOT_IN_PLACE,
+            )
+
+        # The refusal names the relation it refused, not just "a relation".
+        assert "Previous" in str(caught.value)
+
+        # Nothing was written: no snapshot page, no rewrite of the hub, no
+        # relinking — and the refusal beat even the transcript read.
+        assert [c for c in client.calls if c[0] in _WRITE_CALLS] == []
+        assert [c for c in client.calls if c[0] != "pages.retrieve"] == []
+        assert client.creates == []
+        assert client.updates == []
+        assert client.text_of(SOURCE_ID) == ["hub body"]
+
 
 # ---------------------------------------------------------------------------
 # AC-9 — snapshot-in-place
@@ -1041,22 +1091,49 @@ class TestSnapshotInPlace:
             ("comments.list", SOURCE_ID)
         ]
 
-    def test_an_uncopyable_block_refuses_before_anything_is_written(self):
+    @pytest.mark.parametrize(
+        "block_types",
+        [
+            *([btype] for btype in sorted(_UNCOPYABLE_BLOCK_TYPES)),
+            ["child_page", "child_database"],
+        ],
+        ids=lambda types: "+".join(types),
+    )
+    def test_an_uncopyable_block_refuses_before_anything_is_written(self, block_types):
         """A snapshot that cannot carry the content cannot justify the rewrite.
 
-        `_sanitize_block` returns None for a `child_page` / `child_database`, so
-        the snapshot simply lacked the block — and then the `allow_destructive`
-        rewrite deleted it at source. Deleting a `child_page` block trashes the
-        child page; deleting a `child_database` block trashes the database. The
-        mode that exists to avoid loss was trashing sub-pages and reporting it
-        afterwards in `content_error`, on exactly the page shape ("an index, a
-        package cover") that holds them.
+        `_sanitize_block` returns None for every member of
+        `_UNCOPYABLE_BLOCK_TYPES`, so the snapshot simply lacked the block — and
+        then the `allow_destructive` rewrite deleted it at source. Deleting a
+        `child_page` block trashes the child page; deleting a `child_database`
+        block trashes the database. The mode that exists to avoid loss was
+        trashing sub-pages and reporting it afterwards in `content_error`, on
+        exactly the page shape ("an index, a package cover") that holds them.
+
+        Each member gets its own case, as the ONLY uncopyable block on an
+        otherwise copyable body, because a fixture carrying two of them proves
+        nothing about the other three: the refusal fires on the first type it
+        meets, so a set narrowed to `child_page`/`child_database` reads green
+        against a fixture that publishes both. The final case keeps the original
+        pair, which is what binds the sorted aggregation of several types.
+
+        The membership itself is pinned in the same breath, and it has to be
+        pinned *here* rather than in a test of its own: the parametrization reads
+        `_UNCOPYABLE_BLOCK_TYPES`, so it stays exhaustive however the set grows —
+        but a parametrization that follows the set cannot watch the set shrink.
+        Narrow it and the cases narrow with it, every one of them still green,
+        while a type the `allow_destructive` rewrite deletes at source quietly
+        stops being refused. Asserted inside the case, both directions go red.
         """
+        documented = {"child_page", "child_database", "unsupported", "synced_block", "ai_block"}
+        assert _UNCOPYABLE_BLOCK_TYPES == frozenset(documented)
+
         client = ReviseFakeClient(
             properties={"Name": _title_prop("Package Hub"), "Previous": _relation()},
-            blocks=[_para("hub body"), _child_page("Sub-page"), _child_database("Sub-db")],
+            blocks=[_para("hub body"), *(_uncopyable(btype) for btype in block_types)],
         )
         before = client.block_ids(SOURCE_ID)
+        before_text = client.text_of(SOURCE_ID)
 
         with pytest.raises(IncompleteSnapshotError) as caught:
             revise_page(
@@ -1068,8 +1145,9 @@ class TestSnapshotInPlace:
             )
 
         # The refusal names what it could not copy, so the caller can act on it.
-        assert caught.value.block_types == ("child_database", "child_page")
-        assert "child_page" in str(caught.value)
+        assert caught.value.block_types == tuple(sorted(block_types))
+        for btype in block_types:
+            assert btype in str(caught.value)
         assert caught.value.page_id == SOURCE_ID
         # Nothing was created, so there is not even a half-snapshot to clean up.
         assert caught.value.snapshot_page_id is None
@@ -1078,7 +1156,7 @@ class TestSnapshotInPlace:
         writes = [c for c in client.calls if c[0] in _WRITE_CALLS]
         assert writes == []
         assert client.block_ids(SOURCE_ID) == before
-        assert client.text_of(SOURCE_ID) == ["hub body", "", ""]
+        assert client.text_of(SOURCE_ID) == before_text
         assert client.updates == []
         assert client.creates == []
 
