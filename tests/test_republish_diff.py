@@ -521,6 +521,50 @@ class TestListingAndCounts:
             assert phrase in str(caught.value)
             assert caught.value.code == "malformed_response"
 
+    def test_strict_refuses_a_non_block_entry_inside_a_well_formed_results_list(self):
+        """The fourth strict arm (nops-cycle-3 rev5, R3-3), which the three envelopes above stop one line short of.
+
+        Every shape in the sibling test is malformed at the envelope: the reader never gets as far as looking at an individual entry. This one is a perfectly well-formed page of results carrying one thing that is not a block object — the shape a server produces when it interleaves something else into a list the client is entitled to assume is homogeneous.
+
+        It is the arm whose absence costs the most, because the lax path here does not degrade to a short listing the way the other three do: `block.get("id")` raises `AttributeError`, and `_revise_snapshot_in_place`'s `except NotionOpsError` fold cannot map an `AttributeError`, so the caller gets an unmapped crash where the contract promises `IncompleteSnapshotError`. Asserting the default's `AttributeError` here is not an endorsement of it — it records exactly what the strict arm exists to convert, and pins that the two callers still get the two different answers.
+        """
+        from notion_ops.exceptions import NotionOpsError
+        from notion_ops.utils.publish import _list_children_blocks
+
+        def _client(envelope):
+            class _Children:
+                def list(self, *, block_id, page_size=100, start_cursor=None):
+                    return envelope
+
+            class _Blocks:
+                children = _Children()
+
+            class _API:
+                blocks = _Blocks()
+
+            class _Client:
+                api = _API()
+
+            return _Client()
+
+        non_block_entry = {
+            "results": [{"id": "blk-0"}, "blk-1", {"id": "blk-2"}],
+            "has_more": False,
+            "next_cursor": None,
+        }
+
+        # Default: unchanged, and unchanged means it dies on the entry rather than
+        # warning past it. The two pre-existing call sites never see this shape
+        # from Notion; the point of recording it is that "lax" is not "tolerant".
+        with pytest.raises(AttributeError):
+            _list_children_blocks(_client(non_block_entry), "page-x")
+
+        # Strict: a typed refusal the caller's fold can map, naming the type it got.
+        with pytest.raises(NotionOpsError) as caught:
+            _list_children_blocks(_client(non_block_entry), "page-x", strict=True)
+        assert "a str where a block object belongs" in str(caught.value)
+        assert caught.value.code == "malformed_response"
+
 
 # ---------------------------------------------------------------------------
 # _is_already_gone — each 404 detection branch bound individually (Step-4 S1)

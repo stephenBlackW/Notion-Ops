@@ -458,7 +458,8 @@ def _malform_the_first_hub_read(
       of the results (``keep=0`` is the truncated-to-empty variant, hostile-5's
       scenario transplanted onto the destructive path);
     - ``non-dict`` — not a JSON object at all;
-    - ``results-not-a-list`` — an envelope whose ``results`` is not a list.
+    - ``results-not-a-list`` — an envelope whose ``results`` is not a list;
+    - ``non-block-entry`` — a well-formed envelope whose ``results`` *is* a list, carrying something that is not a block object among otherwise valid blocks. The one shape whose lax path does not degrade to a short listing at all: without the strict arm ``block.get("id")`` raises ``AttributeError``, which the caller's ``except NotionOpsError`` fold cannot map, so the caller gets an unmapped crash where the contract promises ``IncompleteSnapshotError`` (nops-cycle-3 rev5, R3-3).
     """
     state = {"spent": False}
 
@@ -476,6 +477,10 @@ def _malform_the_first_hub_read(
             return None
         if shape == "results-not-a-list":
             return {"results": "hub block 1", "has_more": False, "next_cursor": None}
+        if shape == "non-block-entry":
+            results = list(envelope["results"])
+            results.insert(1, "hub block 2")
+            return {"results": results, "has_more": False, "next_cursor": None}
         raise AssertionError(f"unknown malformed shape {shape!r}")
 
     return hook
@@ -1365,12 +1370,14 @@ class TestSnapshotInPlace:
             ("truncated", 0, 3, "next_cursor"),
             ("non-dict", 0, 3, "rather than a list envelope"),
             ("results-not-a-list", 0, 3, "no usable 'results'"),
+            ("non-block-entry", 0, 3, "a str where a block object belongs"),
         ],
         ids=[
             "truncated-with-content",
             "truncated-to-empty",
             "non-dict-envelope",
             "results-not-a-list",
+            "non-block-entry",
         ],
     )
     def test_a_malformed_children_read_refuses_before_anything_is_written(
@@ -1394,6 +1401,8 @@ class TestSnapshotInPlace:
         A truncated listing is *unknown*, not *empty*. Each shape must therefore
         reach the refusal that already sits before `_create_page`, leaving the hub
         page byte-for-byte as it was.
+
+        The `non-block-entry` case (nops-cycle-3 rev5, R3-3) is the fourth strict arm, and it is the only one whose lax path does not merely under-report: a str inside a well-formed `results` list makes `block.get("id")` raise `AttributeError`, which `except NotionOpsError` does not catch, so what reaches the caller is an unmapped crash rather than the `IncompleteSnapshotError` the contract promises. Asserting the exception *type* here is therefore the load-bearing half of the case, not boilerplate shared with its three siblings.
         """
         client = ReviseFakeClient(
             properties={"Name": _title_prop("Package Hub"), "Previous": _relation()},
