@@ -15,6 +15,8 @@ This high-level test subsumes many lower-level unit tests.
 from __future__ import annotations
 
 import inspect
+import os
+from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -24,6 +26,7 @@ from notion_ops.client import AsyncNotionOps, NotionOps
 from notion_ops.models.block import Block, Blocks
 from notion_ops.models.page import Page
 from notion_ops.models.properties import SelectProperty, TitleProperty
+from notion_ops.utils.revise import RevisionSchema
 
 # ---------------------------------------------------------------------------
 # Helpers (mirrored from test_operations/conftest.py)
@@ -330,3 +333,137 @@ class TestNotionDatabaseLifecycle:
 
         assert fetched_db.id == db.id
         assert fetched_db.title == "E2E Test Database"
+
+
+# ---------------------------------------------------------------------------
+# AC-7-live (nops-cycle-3) — the dual-relation inverse, against a live workspace
+# ---------------------------------------------------------------------------
+#
+# Everything above this line is a MOCKED lifecycle that happens to carry the
+# `e2e` marker. This one is genuinely live: `revise_page` writes only
+# `old.Next = [new]` and leaves `new.Previous` to Notion's dual-relation inverse,
+# and Step 2 could establish that the pair IS dual (a read) but not that writing
+# one side back-fills the other (a write). AC-7 binds the library's half — one
+# relation write, on the old page. This binds the server's half, which is the
+# only assumption in the cycle that in-repo evidence cannot settle.
+#
+# It needs a live workspace and a data source carrying a dual Next/Previous pair
+# plus a `Status` select offering "Archived". Without a key, or without an id to
+# aim at, it SKIPS (ENV-CONSTRAINED, not a miss). Its fixture pages are titled
+# with a `nops-cycle-3 e2e ` prefix and trashed in a `finally`.
+
+
+def _live_data_source_id() -> str | None:
+    """The data source AC-7-live writes its fixtures into, or ``None`` to skip.
+
+    Read from the environment first so the public library's own suite never has
+    to carry a private workspace's id; the AgenticOS hub, where this cycle runs,
+    supplies it through its config loader instead.
+    """
+    from_env = os.environ.get("NOTION_E2E_DATA_SOURCE_ID")
+    if from_env:
+        return from_env
+    try:
+        from cli.config import get_database_id  # type: ignore[import-not-found]
+
+        return str(get_database_id("atoms", "data_source_id"))
+    except Exception:
+        return None
+
+
+LIVE_SCHEMA = RevisionSchema(
+    title_property="Name",
+    supersede_property="Next",
+    predecessor_property="Previous",
+    status_property="Status",
+    archived_status_value="Archived",
+    carry_properties=("Type",),
+)
+
+FIXTURE_PREFIX = "nops-cycle-3 e2e "
+
+
+def _trash(client: Any, page_id: str) -> None:
+    """Trash a fixture page. Only ever called on pages this test created."""
+    try:
+        client.api.pages.update(page_id=page_id, in_trash=True)
+    except Exception:  # noqa: BLE001 - cleanup must not mask the real assertion
+        try:
+            client.api.pages.update(page_id=page_id, archived=True)
+        except Exception:
+            pass
+
+
+@pytest.mark.e2e
+class TestDualRelationInverseLive:
+    """AC-7-live: writing one side of a dual relation populates the other."""
+
+    def test_inverse_is_auto_set_by_the_server(self):
+        if not os.environ.get("NOTION_API_KEY"):
+            pytest.skip("ENV-CONSTRAINED: no NOTION_API_KEY in this environment")
+        data_source_id = _live_data_source_id()
+        if not data_source_id:
+            pytest.skip(
+                "ENV-CONSTRAINED: no data source id "
+                "(set NOTION_E2E_DATA_SOURCE_ID or run from a workspace config)"
+            )
+
+        from notion_ops.client import NotionOps
+        from notion_ops.utils.ids import extract_notion_id
+        from notion_ops.utils.revise import revise_page
+
+        client = NotionOps()
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        source = client.api.pages.create(
+            parent={"type": "data_source_id", "data_source_id": data_source_id},
+            properties={
+                "Name": {
+                    "title": [
+                        {
+                            "type": "text",
+                            "text": {"content": f"{FIXTURE_PREFIX}source {stamp}"},
+                        }
+                    ]
+                },
+                "Status": {"select": {"name": "Draft"}},
+            },
+        )
+        source_id = extract_notion_id(source["id"])
+        successor_id = None
+        try:
+            result = revise_page(
+                client,
+                source_id,
+                new_markdown="Revised body written by the nops-cycle-3 e2e test.",
+                schema=LIVE_SCHEMA,
+            )
+            successor_id = result.canonical_page_id
+
+            successor = client.api.pages.retrieve(page_id=successor_id)
+            inverse = successor["properties"]["Previous"]["relation"]
+            linked = {extract_notion_id(r["id"]) for r in inverse}
+            assert source_id in linked, (
+                "the dual-relation inverse was NOT auto-set: revise_page wrote only "
+                "old.Next, so new.Previous must come from the server. If this fails, "
+                "revise_page has to write both sides (spec §9 fallback)."
+            )
+
+            superseded = client.api.pages.retrieve(page_id=source_id)
+            title = "".join(
+                span.get("plain_text", "")
+                for span in superseded["properties"]["Name"]["title"]
+            )
+            assert title.endswith("(v1)")
+            assert superseded["properties"]["Status"]["select"]["name"] == "Archived"
+            # D-6: archived is a STATUS, and the page is still live.
+            assert superseded.get("in_trash") is not True
+            assert superseded.get("archived") is not True
+
+            forward = client.api.pages.retrieve(page_id=source_id)["properties"]["Next"]
+            assert {extract_notion_id(r["id"]) for r in forward["relation"]} == {
+                extract_notion_id(successor_id)
+            }
+        finally:
+            for page_id in (successor_id, source_id):
+                if page_id:
+                    _trash(client, page_id)

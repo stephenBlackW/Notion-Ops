@@ -44,6 +44,15 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from notion_client import APIResponseError
+
+from notion_ops.exceptions import map_api_error
+from notion_ops.utils.ids import extract_notion_id
+from notion_ops.utils.markdown import markdown_to_blocks
+from notion_ops.utils.publish import publish_block_tree
+from notion_ops.utils.responses import sync_dict
+from notion_ops.utils.retry import retry_on_transient
+
 logger = logging.getLogger(__name__)
 
 #: Modes :func:`revise_page` accepts.
@@ -147,6 +156,169 @@ class RevisionResult:
     content_error: str | None = None
 
 
+class _Requests:
+    """A tally of the API requests one :func:`revise_page` call issues."""
+
+    def __init__(self) -> None:
+        self.count = 0
+
+    def bump(self, n: int = 1) -> None:
+        self.count += n
+
+
+@retry_on_transient
+def _retrieve_page(client: Any, page_id: str) -> dict[str, Any]:
+    """Read a page, retry-wrapped, mapping API errors to the library's types."""
+    try:
+        return sync_dict(client.api.pages.retrieve(page_id=page_id))
+    except APIResponseError as e:
+        raise map_api_error(e, resource_type="Page", resource_id=page_id) from e
+
+
+@retry_on_transient
+def _create_page(
+    client: Any,
+    parent: dict[str, Any],
+    properties: dict[str, Any],
+) -> dict[str, Any]:
+    """Create a page, retry-wrapped."""
+    try:
+        return sync_dict(client.api.pages.create(parent=parent, properties=properties))
+    except APIResponseError as e:
+        target = str(parent.get(str(parent.get("type", "")), ""))
+        raise map_api_error(e, resource_type="Page", resource_id=target) from e
+
+
+@retry_on_transient
+def _update_page(client: Any, page_id: str, properties: dict[str, Any]) -> None:
+    """Write page properties, retry-wrapped.
+
+    Only ``properties`` is ever sent. ``archived`` / ``in_trash`` are deliberately
+    unreachable from here (D-6): trashing a superseded page would take its
+    discussion out of view, which is precisely the loss this module exists to
+    prevent. "Archived" here is a *status value*, a label on a live page.
+    """
+    try:
+        client.api.pages.update(page_id=page_id, properties=properties)
+    except APIResponseError as e:
+        raise map_api_error(e, resource_type="Page", resource_id=page_id) from e
+
+
+def _title_text(properties: dict[str, Any], name: str) -> str:
+    """The plain text of a title property, or ``""`` when absent or empty."""
+    spans = (properties.get(name) or {}).get("title") or []
+    return "".join(
+        span.get("plain_text", "") for span in spans if isinstance(span, dict)
+    )
+
+
+def _clean_title(raw: str) -> str:
+    """*raw* with one trailing ``" (vN)"`` removed, so versions do not compound."""
+    return _VERSION_SUFFIX.sub("", raw).strip() or raw
+
+
+def _title_value(text: str) -> dict[str, Any]:
+    """A title property in API write shape."""
+    return {"title": [{"type": "text", "text": {"content": text}}]}
+
+
+def _rich_text_value(text: str) -> dict[str, Any]:
+    """A rich-text property in API write shape."""
+    return {"rich_text": [{"type": "text", "text": {"content": text}}]}
+
+
+def _version_number(properties: dict[str, Any], predecessor_property: str | None) -> int:
+    """``len(predecessor chain) + 1``, read live off the page, never stored.
+
+    A counter kept anywhere else drifts after a partial failure; the relation
+    chain is the truth, and an empty chain is version 1.
+    """
+    if not predecessor_property:
+        return 1
+    chain = (properties.get(predecessor_property) or {}).get("relation") or []
+    return len(chain) + 1
+
+
+def _parent_payload(parent: str | None, page: dict[str, Any]) -> dict[str, Any]:
+    """The ``parent`` argument for ``pages.create``.
+
+    An explicit *parent* is read as a **data source id**, the parent kind page
+    creation takes under the data-sources API. With no override the source page's
+    own parent is reused verbatim, so the successor lands beside the original
+    whatever kind of container that is.
+    """
+    if parent:
+        return {
+            "type": "data_source_id",
+            "data_source_id": extract_notion_id(parent),
+        }
+    source_parent = page.get("parent") or {}
+    kind = source_parent.get("type")
+    if kind and kind in source_parent:
+        return {"type": kind, kind: source_parent[kind]}
+    raise ValueError(
+        f"cannot derive a parent for the new page from {source_parent!r}; "
+        f"pass parent=<data source id> explicitly"
+    )
+
+
+def _carried_properties(
+    properties: dict[str, Any],
+    names: tuple[str, ...],
+) -> dict[str, Any]:
+    """The subset of *properties* named by *names*, in API write shape.
+
+    A name absent from the source is skipped rather than written as null, and a
+    computed type is skipped because Notion rejects it on write — which would
+    fail the whole page creation over a field the caller never meant to set.
+    """
+    carried: dict[str, Any] = {}
+    for name in names:
+        prop = properties.get(name)
+        if not isinstance(prop, dict):
+            continue
+        kind = prop.get("type")
+        if not isinstance(kind, str) or kind not in prop:
+            continue
+        if kind in _COMPUTED_PROPERTY_TYPES:
+            logger.debug("Not carrying computed property %r (%s) to the successor", name, kind)
+            continue
+        carried[name] = {kind: prop[kind]}
+    return carried
+
+
+def _resolve_content(
+    new_markdown: str | None,
+    new_blocks: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """The new body as blocks, with exactly one of the two inputs required."""
+    if (new_markdown is None) == (new_blocks is None):
+        raise ValueError(
+            "revise_page requires exactly one of new_markdown or new_blocks"
+        )
+    if new_markdown is not None:
+        return markdown_to_blocks(new_markdown)
+    return list(new_blocks or [])
+
+
+def _superseded_title_properties(
+    schema: RevisionSchema,
+    title: str,
+    version: int,
+) -> dict[str, Any]:
+    """Title (and status, when the schema names one) for the superseded page."""
+    properties: dict[str, Any] = {
+        schema.title_property: _title_value(
+            schema.version_title_template.format(title=title, n=version)
+        )
+    }
+    if schema.status_property and schema.archived_status_value:
+        properties[schema.status_property] = {
+            "select": {"name": schema.archived_status_value}
+        }
+    return properties
+
+
 def revise_page(
     client: Any,
     page_id: str,
@@ -169,34 +341,140 @@ def revise_page(
         new_blocks: The new content as an API-format block list.
         schema: The property names to write. See :class:`RevisionSchema`.
         mode: ``"new-canonical"`` (default) or ``"snapshot-in-place"``.
-        reason: Free text recorded on the successor via
-            ``schema.reason_property``, when that name is set.
+        reason: Free text recorded on the page carrying the new content, via
+            ``schema.reason_property``. Ignored when that name is unset.
         parent: Data source id for the created page. Defaults to the source
-            page's own parent, so the successor lands beside the original.
-        capture_transcript: Read the page's open discussions before writing and
-            return them on the result. Snapshot-in-place mode is where this
-            matters — it is the only record that survives the rewrite.
+            page's own parent, so the new page lands beside the original.
+        capture_transcript: Read the page's open discussions before writing.
+            Only ``snapshot-in-place`` reads them at all — that is the mode where
+            the discussion is at risk and the transcript is the only record that
+            survives. New-canonical touches no block a comment is anchored to, so
+            it spends no request asking.
 
     Returns:
         A :class:`RevisionResult`.
 
     Raises:
         ValueError: Neither or both of ``new_markdown``/``new_blocks``; an
-            unknown ``mode``; or ``mode="snapshot-in-place"`` without
-            ``schema.predecessor_property`` (which would orphan the snapshot).
+            unknown ``mode``; ``mode="snapshot-in-place"`` without
+            ``schema.predecessor_property`` (which would orphan the snapshot); or
+            a source page whose parent cannot be derived.
         NotFoundError: ``page_id`` cannot be read.
         OversizedContentError: Propagated from the markdown conversion.
 
     A re-run is **not idempotent** — revising twice legitimately means two
-    versions — but it is never destructive: the superseded page's blocks are
-    untouched in new-canonical mode, and the version number is derived from the
-    live predecessor chain rather than a stored counter, so a re-run after a
-    partial failure produces ``(vN+1)`` and a consistent chain. The successor is
-    created and populated **before** the original is retitled or relinked, so an
-    interruption leaves an orphan successor and an untouched original, never a
-    relinked original pointing at nothing.
+    versions — but it is never destructive: in new-canonical mode the superseded
+    page's blocks are untouched, and the version number is derived from the live
+    predecessor chain rather than a stored counter, so a re-run after a partial
+    failure produces ``(vN+1)`` and a consistent chain rather than a duplicate.
+    The new page is created and populated **before** the original is retitled or
+    relinked, so an interruption leaves an orphan page and an untouched original
+    — recoverable by hand, never lossy — rather than a relinked original pointing
+    at nothing.
     """
-    raise NotImplementedError
+    if mode not in (NEW_CANONICAL, SNAPSHOT_IN_PLACE):
+        raise ValueError(
+            f"unknown mode {mode!r}; expected {NEW_CANONICAL!r} or {SNAPSHOT_IN_PLACE!r}"
+        )
+    if mode == SNAPSHOT_IN_PLACE and schema.predecessor_property is None:
+        raise ValueError(
+            "mode='snapshot-in-place' needs schema.predecessor_property: without a "
+            "back-link from the page to its snapshot, the snapshot is orphaned"
+        )
+    blocks = _resolve_content(new_markdown, new_blocks)
+
+    source_id = extract_notion_id(page_id)
+    requests = _Requests()
+
+    page = _retrieve_page(client, source_id)
+    requests.bump()
+    properties = page.get("properties") or {}
+    title = _clean_title(_title_text(properties, schema.title_property))
+    version = _version_number(properties, schema.predecessor_property)
+    new_page_parent = _parent_payload(parent, page)
+
+    if mode == NEW_CANONICAL:
+        return _revise_new_canonical(
+            client,
+            source_id=source_id,
+            blocks=blocks,
+            properties=properties,
+            title=title,
+            version=version,
+            new_page_parent=new_page_parent,
+            schema=schema,
+            reason=reason,
+            requests=requests,
+        )
+    raise NotImplementedError(
+        "mode='snapshot-in-place' lands in Phase E"
+    )
+
+
+def _revise_new_canonical(
+    client: Any,
+    *,
+    source_id: str,
+    blocks: list[dict[str, Any]],
+    properties: dict[str, Any],
+    title: str,
+    version: int,
+    new_page_parent: dict[str, Any],
+    schema: RevisionSchema,
+    reason: str | None,
+    requests: _Requests,
+) -> RevisionResult:
+    """LEAF: the successor becomes canonical; the original is left intact.
+
+    Nothing here writes a block on the original page, so its comments keep both
+    their text and their anchors — the property ISS-029 lost.
+    """
+    successor_properties = _carried_properties(properties, schema.carry_properties)
+    successor_properties[schema.title_property] = _title_value(title)
+    if schema.reason_property and reason:
+        successor_properties[schema.reason_property] = _rich_text_value(reason)
+
+    successor = _create_page(client, new_page_parent, successor_properties)
+    requests.bump()
+    successor_id = extract_notion_id(str(successor.get("id", "")))
+
+    content_error: str | None = None
+    if blocks:
+        published = publish_block_tree(client, successor_id, blocks)
+        requests.bump(published.request_count)
+        if published.partial:
+            content_error = (
+                f"{published.skipped_followups} nested append(s) were skipped while "
+                f"publishing the successor page {successor_id}; the page exists — "
+                f"do not retry the revision"
+            )
+
+    # The supersede link first: it is the machine-readable half, so an
+    # interruption after it leaves a navigable chain rather than an orphan
+    # labelled "(vN)" that points nowhere.
+    if schema.supersede_property:
+        _update_page(
+            client,
+            source_id,
+            {schema.supersede_property: {"relation": [{"id": successor_id}]}},
+        )
+        requests.bump()
+
+    _update_page(
+        client,
+        source_id,
+        _superseded_title_properties(schema, title, version),
+    )
+    requests.bump()
+
+    return RevisionResult(
+        canonical_page_id=successor_id,
+        archived_page_id=source_id,
+        version=version,
+        mode=NEW_CANONICAL,
+        request_count=requests.count,
+        content_error=content_error,
+    )
 
 
 __all__ = [
