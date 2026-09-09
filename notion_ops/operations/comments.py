@@ -22,8 +22,18 @@ caller believe a discussion had been carried across a rewrite.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+
+from notion_client import APIResponseError
+
+from notion_ops.exceptions import map_api_error
+from notion_ops.utils.ids import extract_notion_id
+from notion_ops.utils.responses import sync_dict
+from notion_ops.utils.retry import retry_on_transient, retry_on_transient_async
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from notion_ops.client import AsyncNotionOps, NotionOps
@@ -69,6 +79,39 @@ def _to_discussion(payload: dict[str, Any]) -> Discussion:
     )
 
 
+def _list_params(block_id: str, cursor: str | None) -> dict[str, Any]:
+    """Query parameters for one ``GET /v1/comments`` page."""
+    params: dict[str, Any] = {"block_id": block_id, "page_size": 100}
+    if cursor:
+        params["start_cursor"] = cursor
+    return params
+
+
+def _results_of(response: dict[str, Any]) -> list[dict[str, Any]]:
+    """The comment objects in one list envelope."""
+    return [c for c in response.get("results", []) or [] if isinstance(c, dict)]
+
+
+def _next_cursor(response: dict[str, Any], block_id: str) -> str | None:
+    """The cursor for the next page, or ``None`` when the listing is complete.
+
+    An envelope claiming ``has_more`` without a cursor is a malformed response;
+    stopping (loudly) beats re-requesting the same page forever, and matches
+    ``_list_children_blocks``'s handling of the same shape.
+    """
+    if not response.get("has_more"):
+        return None
+    cursor = response.get("next_cursor")
+    if not cursor:
+        logger.warning(
+            "comments.list reported has_more=True but returned no next_cursor "
+            "for %s; stopping pagination. The comment listing may be truncated.",
+            block_id,
+        )
+        return None
+    return str(cursor)
+
+
 def list_discussions(client: Any, block_id: str) -> list[Discussion]:
     """List the open discussions on *block_id*, paginated and retry-wrapped.
 
@@ -77,12 +120,47 @@ def list_discussions(client: Any, block_id: str) -> list[Discussion]:
     duck-typed ``client`` the publisher already accepts.
     ``CommentOperations.list`` is the public sugar over this function.
     """
-    raise NotImplementedError
+    block = extract_notion_id(block_id)
+
+    @retry_on_transient
+    def _list(cursor: str | None) -> dict[str, Any]:
+        params = _list_params(block, cursor)
+        try:
+            return sync_dict(client.api.comments.list(**params))
+        except APIResponseError as e:
+            raise map_api_error(e, resource_type="Comment", resource_id=block) from e
+
+    found: list[Discussion] = []
+    cursor: str | None = None
+    while True:
+        response = _list(cursor)
+        found.extend(_to_discussion(c) for c in _results_of(response))
+        cursor = _next_cursor(response, block)
+        if cursor is None:
+            return found
 
 
 async def list_discussions_async(client: Any, block_id: str) -> list[Discussion]:
     """Async twin of :func:`list_discussions`."""
-    raise NotImplementedError
+    block = extract_notion_id(block_id)
+
+    @retry_on_transient_async
+    async def _list(cursor: str | None) -> dict[str, Any]:
+        params = _list_params(block, cursor)
+        try:
+            response = await client.api.comments.list(**params)
+            return response if isinstance(response, dict) else {}
+        except APIResponseError as e:
+            raise map_api_error(e, resource_type="Comment", resource_id=block) from e
+
+    found: list[Discussion] = []
+    cursor: str | None = None
+    while True:
+        response = await _list(cursor)
+        found.extend(_to_discussion(c) for c in _results_of(response))
+        cursor = _next_cursor(response, block)
+        if cursor is None:
+            return found
 
 
 class CommentOperations:
@@ -106,11 +184,11 @@ class CommentOperations:
         Raises:
             PermissionError: The integration lacks the read-comments capability.
         """
-        raise NotImplementedError
+        return list_discussions(self._client, block_id)
 
     def has_discussion(self, block_id: str) -> bool:
         """True when *block_id* carries at least one **un-resolved** comment."""
-        raise NotImplementedError
+        return bool(self.list(block_id))
 
 
 class AsyncCommentOperations:
@@ -121,11 +199,11 @@ class AsyncCommentOperations:
 
     async def list(self, block_id: str) -> list[Discussion]:
         """Return the **un-resolved** comments on a page or block (async)."""
-        raise NotImplementedError
+        return await list_discussions_async(self._client, block_id)
 
     async def has_discussion(self, block_id: str) -> bool:
         """True when *block_id* carries at least one un-resolved comment (async)."""
-        raise NotImplementedError
+        return bool(await self.list(block_id))
 
 
 __all__ = [
