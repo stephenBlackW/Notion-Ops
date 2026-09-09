@@ -41,15 +41,21 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from notion_client import APIResponseError
 
 from notion_ops.exceptions import map_api_error
+from notion_ops.operations.comments import Discussion, list_discussions
 from notion_ops.utils.ids import extract_notion_id
 from notion_ops.utils.markdown import markdown_to_blocks
-from notion_ops.utils.publish import publish_block_tree
+from notion_ops.utils.publish import (
+    _list_children_blocks,
+    publish_block_tree,
+    republish_block_tree,
+)
 from notion_ops.utils.responses import sync_dict
 from notion_ops.utils.retry import retry_on_transient
 
@@ -287,6 +293,122 @@ def _carried_properties(
     return carried
 
 
+def _text_block(text: str, block_type: str = "paragraph") -> dict[str, Any]:
+    """One API-format text block, built without a markdown round trip."""
+    return {
+        "object": "block",
+        "type": block_type,
+        block_type: {"rich_text": [{"type": "text", "text": {"content": text}}]},
+    }
+
+
+def _transcript_blocks(discussions: Sequence[Discussion]) -> list[dict[str, Any]]:
+    """The captured discussion, rendered as blocks for the snapshot page.
+
+    The API can neither move a comment nor originate a block-anchored one, so the
+    anchor itself cannot be reproduced — it is recorded as text beside the
+    comment, which is the most an API-realizable transcript can honestly claim.
+    """
+    if not discussions:
+        return []
+    heading = (
+        f"Discussion transcript captured at revision "
+        f"({len(discussions)} open comment(s))"
+    )
+    note = (
+        "Copied from the page this snapshot supersedes. The Notion API cannot move "
+        "or re-anchor a comment, so the threads themselves stay on that page and "
+        "only their text is reproduced here."
+    )
+    blocks = [
+        {"object": "block", "type": "divider", "divider": {}},
+        _text_block(heading, "heading_2"),
+        _text_block(note),
+    ]
+    for discussion in discussions:
+        where = (
+            f"anchored to block {discussion.parent_block_id}"
+            if discussion.parent_block_id
+            else "page-level"
+        )
+        author = discussion.created_by or "unknown author"
+        blocks.append(_text_block(f"[{where}, by {author}] {discussion.plain_text}"))
+    return blocks
+
+
+#: Keys the API returns inside a block body that it will not accept back.
+_READ_ONLY_BLOCK_BODY_KEYS = frozenset({"id", "created_time", "last_edited_time"})
+
+#: Block types the API returns but cannot re-create from their own payload. A
+#: snapshot copy drops them and names them in ``content_error`` rather than
+#: failing the whole revision over content it was never able to copy.
+_UNCOPYABLE_BLOCK_TYPES = frozenset(
+    {"child_page", "child_database", "unsupported", "synced_block", "ai_block"}
+)
+
+
+def _sanitize_rich_text(spans: Any) -> list[Any]:
+    """Strip the API-only fields (``plain_text``, ``href``) off a rich-text array."""
+    out: list[Any] = []
+    for span in spans or []:
+        if isinstance(span, dict):
+            out.append({k: v for k, v in span.items() if k not in ("plain_text", "href")})
+        else:
+            out.append(span)
+    return out
+
+
+def _sanitize_block(block: dict[str, Any], skipped: set[str]) -> dict[str, Any] | None:
+    """An API-returned block reduced to something ``children.append`` accepts.
+
+    Returns ``None`` for a block type the API cannot re-create from its own
+    payload; the type is recorded in *skipped* so the caller can say what did not
+    make it onto the snapshot.
+    """
+    btype = block.get("type", "")
+    if not btype or btype in _UNCOPYABLE_BLOCK_TYPES:
+        if btype:
+            skipped.add(btype)
+        return None
+    body = block.get(btype)
+    if not isinstance(body, dict):
+        return {"object": "block", "type": btype, btype: {}}
+
+    clean: dict[str, Any] = {}
+    for key, value in body.items():
+        if key in _READ_ONLY_BLOCK_BODY_KEYS or key == "children":
+            continue
+        if key in ("rich_text", "caption"):
+            clean[key] = _sanitize_rich_text(value)
+        elif key == "cells" and isinstance(value, list):
+            clean[key] = [_sanitize_rich_text(cell) for cell in value]
+        else:
+            clean[key] = value
+    return {"object": "block", "type": btype, btype: clean}
+
+
+def _copy_page_body(
+    client: Any,
+    page_id: str,
+    requests: _Requests,
+    skipped: set[str],
+) -> list[dict[str, Any]]:
+    """Read *page_id*'s block tree and return a re-publishable copy of it."""
+    children = _list_children_blocks(client, page_id)
+    requests.bump()
+    copied: list[dict[str, Any]] = []
+    for block in children:
+        clean = _sanitize_block(block, skipped)
+        if clean is None:
+            continue
+        if block.get("has_children") and block.get("id"):
+            nested = _copy_page_body(client, block["id"], requests, skipped)
+            if nested:
+                clean[clean["type"]]["children"] = nested
+        copied.append(clean)
+    return copied
+
+
 def _resolve_content(
     new_markdown: str | None,
     new_blocks: list[dict[str, Any]] | None,
@@ -299,6 +421,17 @@ def _resolve_content(
     if new_markdown is not None:
         return markdown_to_blocks(new_markdown)
     return list(new_blocks or [])
+
+
+def _read_transcript(
+    client: Any,
+    page_id: str,
+    requests: _Requests,
+) -> list[Discussion]:
+    """The page's open discussions, read **before** anything is written."""
+    discussions = list_discussions(client, page_id)
+    requests.bump()
+    return discussions
 
 
 def _superseded_title_properties(
@@ -406,8 +539,18 @@ def revise_page(
             reason=reason,
             requests=requests,
         )
-    raise NotImplementedError(
-        "mode='snapshot-in-place' lands in Phase E"
+    return _revise_snapshot_in_place(
+        client,
+        source_id=source_id,
+        blocks=blocks,
+        properties=properties,
+        title=title,
+        version=version,
+        new_page_parent=new_page_parent,
+        schema=schema,
+        reason=reason,
+        capture_transcript=capture_transcript,
+        requests=requests,
     )
 
 
@@ -474,6 +617,95 @@ def _revise_new_canonical(
         mode=NEW_CANONICAL,
         request_count=requests.count,
         content_error=content_error,
+    )
+
+
+def _revise_snapshot_in_place(
+    client: Any,
+    *,
+    source_id: str,
+    blocks: list[dict[str, Any]],
+    properties: dict[str, Any],
+    title: str,
+    version: int,
+    new_page_parent: dict[str, Any],
+    schema: RevisionSchema,
+    reason: str | None,
+    capture_transcript: bool,
+    requests: _Requests,
+) -> RevisionResult:
+    """HUB: the page keeps its id; its old body is snapshotted to a new page.
+
+    Honest about its cost: replacing the page's blocks detaches every comment
+    anchored to them, and no API call can re-attach one. So the discussion is
+    read **before** the first write and published onto the snapshot, where the
+    text at least sits beside the content it was about.
+    """
+    discussions: list[Discussion] = []
+    if capture_transcript:
+        discussions = _read_transcript(client, source_id, requests)
+
+    skipped_types: set[str] = set()
+    old_body = _copy_page_body(client, source_id, requests, skipped_types)
+
+    snapshot_properties = _carried_properties(properties, schema.carry_properties)
+    snapshot_properties.update(_superseded_title_properties(schema, title, version))
+
+    snapshot = _create_page(client, new_page_parent, snapshot_properties)
+    requests.bump()
+    snapshot_id = extract_notion_id(str(snapshot.get("id", "")))
+
+    notes: list[str] = []
+    if skipped_types:
+        notes.append(
+            f"block type(s) {sorted(skipped_types)} could not be copied onto the "
+            f"snapshot {snapshot_id}: the API cannot re-create them from their own "
+            f"payload"
+        )
+
+    snapshot_body = old_body + _transcript_blocks(discussions)
+    if snapshot_body:
+        published = publish_block_tree(client, snapshot_id, snapshot_body)
+        requests.bump(published.request_count)
+        if published.partial:
+            notes.append(
+                f"{published.skipped_followups} nested append(s) were skipped while "
+                f"publishing the snapshot {snapshot_id}"
+            )
+
+    # The only legitimate in-library use of the override: this rewrite is exactly
+    # what the guard exists to stop by accident, and exactly what this mode is
+    # for on purpose. Everything recoverable has already been recovered above.
+    republished = republish_block_tree(
+        client, source_id, blocks, allow_destructive=True
+    )
+    requests.bump(republished.request_count)
+    if republished.partial:
+        notes.append(
+            f"{republished.skipped_followups} nested append(s) were skipped while "
+            f"rewriting {source_id}"
+        )
+
+    hub_properties: dict[str, Any] = {}
+    if schema.predecessor_property:
+        hub_properties[schema.predecessor_property] = {
+            "relation": [{"id": snapshot_id}]
+        }
+    if schema.reason_property and reason:
+        hub_properties[schema.reason_property] = _rich_text_value(reason)
+    if hub_properties:
+        _update_page(client, source_id, hub_properties)
+        requests.bump()
+
+    return RevisionResult(
+        canonical_page_id=source_id,
+        archived_page_id=snapshot_id,
+        version=version,
+        mode=SNAPSHOT_IN_PLACE,
+        request_count=requests.count,
+        discussion_count=len(discussions),
+        transcript=tuple(d.plain_text for d in discussions),
+        content_error="; ".join(notes) or None,
     )
 
 
