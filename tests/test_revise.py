@@ -26,6 +26,7 @@ from typing import Any
 
 import pytest
 
+from notion_ops.exceptions import IncompleteSnapshotError
 from notion_ops.utils.ids import extract_notion_id
 from notion_ops.utils.publish import _children_of, _without_children
 from notion_ops.utils.revise import (
@@ -35,6 +36,9 @@ from notion_ops.utils.revise import (
     RevisionSchema,
     revise_page,
 )
+
+#: The fake operations that change something. A refusal must issue none of them.
+_WRITE_CALLS = frozenset({"pages.create", "pages.update", "blocks.append", "blocks.delete"})
 
 SOURCE = "11111111-1111-1111-1111-111111111111"
 SOURCE_ID = extract_notion_id(SOURCE)
@@ -69,6 +73,30 @@ def _para(text: str) -> dict[str, Any]:
         "object": "block",
         "type": "paragraph",
         "paragraph": {"rich_text": [{"type": "text", "text": {"content": text}}]},
+    }
+
+
+def _toggle(text: str, children: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "object": "block",
+        "type": "toggle",
+        "toggle": {
+            "rich_text": [{"type": "text", "text": {"content": text}}],
+            "children": children,
+        },
+    }
+
+
+def _child_page(title: str) -> dict[str, Any]:
+    """A block the API returns and cannot re-create: deleting it TRASHES the page."""
+    return {"object": "block", "type": "child_page", "child_page": {"title": title}}
+
+
+def _child_database(title: str) -> dict[str, Any]:
+    return {
+        "object": "block",
+        "type": "child_database",
+        "child_database": {"title": title},
     }
 
 
@@ -1012,6 +1040,83 @@ class TestSnapshotInPlace:
         assert [c for c in client.calls if c[0] == "comments.list"] == [
             ("comments.list", SOURCE_ID)
         ]
+
+    def test_an_uncopyable_block_refuses_before_anything_is_written(self):
+        """A snapshot that cannot carry the content cannot justify the rewrite.
+
+        `_sanitize_block` returns None for a `child_page` / `child_database`, so
+        the snapshot simply lacked the block — and then the `allow_destructive`
+        rewrite deleted it at source. Deleting a `child_page` block trashes the
+        child page; deleting a `child_database` block trashes the database. The
+        mode that exists to avoid loss was trashing sub-pages and reporting it
+        afterwards in `content_error`, on exactly the page shape ("an index, a
+        package cover") that holds them.
+        """
+        client = ReviseFakeClient(
+            properties={"Name": _title_prop("Package Hub"), "Previous": _relation()},
+            blocks=[_para("hub body"), _child_page("Sub-page"), _child_database("Sub-db")],
+        )
+        before = client.block_ids(SOURCE_ID)
+
+        with pytest.raises(IncompleteSnapshotError) as caught:
+            revise_page(
+                client,
+                SOURCE,
+                new_markdown="replacement",
+                schema=ATOMS_LIKE,
+                mode=SNAPSHOT_IN_PLACE,
+            )
+
+        # The refusal names what it could not copy, so the caller can act on it.
+        assert caught.value.block_types == ("child_database", "child_page")
+        assert "child_page" in str(caught.value)
+        assert caught.value.page_id == SOURCE_ID
+        # Nothing was created, so there is not even a half-snapshot to clean up.
+        assert caught.value.snapshot_page_id is None
+
+        # Zero writes of any kind, and the hub page is byte-for-byte as it was.
+        writes = [c for c in client.calls if c[0] in _WRITE_CALLS]
+        assert writes == []
+        assert client.block_ids(SOURCE_ID) == before
+        assert client.text_of(SOURCE_ID) == ["hub body", "", ""]
+        assert client.updates == []
+        assert client.creates == []
+
+    def test_a_partial_snapshot_publish_stops_before_the_rewrite(self):
+        """D-5's own ordering principle: check before the irreversible write.
+
+        `publish_block_tree` onto the snapshot can come back `partial` — a nested
+        sub-tree never landed. The old code noted that in `content_error` and
+        republished over the source anyway, so the content that failed to copy was
+        then destroyed at its only remaining location.
+        """
+        client = ReviseFakeClient(
+            properties={"Name": _title_prop("Package Hub"), "Previous": _relation()},
+            blocks=[_toggle("outer", [_toggle("mid", [_toggle("inner", [_para("leaf")])])])],
+            drop_append_ids=True,
+        )
+        before = client.block_ids(SOURCE_ID)
+
+        with pytest.raises(IncompleteSnapshotError) as caught:
+            revise_page(
+                client,
+                SOURCE,
+                new_markdown="replacement",
+                schema=ATOMS_LIKE,
+                mode=SNAPSHOT_IN_PLACE,
+            )
+
+        # The snapshot page is named and left in place: deleting a page to tidy up
+        # after a refusal is the behaviour this module exists to avoid.
+        snapshot_id = caught.value.snapshot_page_id
+        assert snapshot_id is not None
+        assert snapshot_id in str(caught.value)
+        assert snapshot_id in client._pages
+
+        # The hub received no write at all.
+        assert client.block_ids(SOURCE_ID) == before
+        assert [c for c in client.calls if c[0] in _WRITE_CALLS and c[1] == SOURCE_ID] == []
+        assert client.updates == []
 
     def test_capture_transcript_false_skips_the_read(self):
         client = self._client()

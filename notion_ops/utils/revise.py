@@ -47,7 +47,11 @@ from typing import Any
 
 from notion_client import APIResponseError
 
-from notion_ops.exceptions import NotionOpsError, map_api_error
+from notion_ops.exceptions import (
+    IncompleteSnapshotError,
+    NotionOpsError,
+    map_api_error,
+)
 from notion_ops.operations.comments import Discussion, list_discussions
 from notion_ops.utils.ids import extract_notion_id
 from notion_ops.utils.markdown import markdown_to_blocks
@@ -474,9 +478,11 @@ def _transcript_blocks(discussions: Sequence[Discussion]) -> list[dict[str, Any]
 #: Keys the API returns inside a block body that it will not accept back.
 _READ_ONLY_BLOCK_BODY_KEYS = frozenset({"id", "created_time", "last_edited_time"})
 
-#: Block types the API returns but cannot re-create from their own payload. A
-#: snapshot copy drops them and names them in ``content_error`` rather than
-#: failing the whole revision over content it was never able to copy.
+#: Block types the API returns but cannot re-create from their own payload.
+#: Snapshot mode **refuses** when the source carries one: the copy would be
+#: missing it and the in-place rewrite would then delete it at source, and for
+#: ``child_page`` / ``child_database`` "delete the block" means "trash the page /
+#: the database". Nothing here is best-effort any more.
 _UNCOPYABLE_BLOCK_TYPES = frozenset(
     {"child_page", "child_database", "unsupported", "synced_block", "ai_block"}
 )
@@ -650,11 +656,18 @@ def revise_page(
         A :class:`RevisionResult`.
 
     Raises:
-        ValueError: Neither or both of ``new_markdown``/``new_blocks``; an
-            unknown ``mode``; ``mode="snapshot-in-place"`` without
-            ``schema.predecessor_property`` (which would orphan the snapshot); or
-            a source page whose parent cannot be derived.
+        ValueError: Neither or both of ``new_markdown``/``new_blocks``; empty
+            content in either of them; an unknown ``mode``;
+            ``mode="snapshot-in-place"`` without ``schema.predecessor_property``
+            (which would orphan the snapshot); a relation this call would extend
+            that the page object returned truncated; or a source page whose parent
+            cannot be derived.
         NotFoundError: ``page_id`` cannot be read.
+        IncompleteSnapshotError: Snapshot mode only, and always **before** the
+            in-place rewrite — the page is left untouched. Raised when the source
+            carries a block type the API cannot re-create, or when the snapshot's
+            own publish came back partial. Import it from
+            ``notion_ops.exceptions``; it is a ``NotionOpsError``.
         OversizedContentError: Propagated from the markdown conversion.
 
     A re-run is **not idempotent** — revising twice legitimately means two
@@ -833,6 +846,17 @@ def _revise_snapshot_in_place(
 
     skipped_types: set[str] = set()
     old_body = _copy_page_body(client, source_id, requests, skipped_types)
+    if skipped_types:
+        # Before the first write of any kind, including the snapshot page itself:
+        # a refusal that has already created something is a mess the caller has to
+        # clean up to act on it.
+        raise IncompleteSnapshotError(
+            source_id,
+            "the page carries block type(s) the API cannot re-create from their "
+            "own payload, and the in-place rewrite would delete them at source "
+            "(deleting a child_page block trashes the child page)",
+            block_types=tuple(sorted(skipped_types)),
+        )
 
     snapshot_properties = _carried_properties(properties, schema.carry_properties)
     snapshot_properties.update(_superseded_title_properties(schema, title, version))
@@ -842,21 +866,20 @@ def _revise_snapshot_in_place(
     snapshot_id = extract_notion_id(str(snapshot.get("id", "")))
 
     notes: list[str] = []
-    if skipped_types:
-        notes.append(
-            f"block type(s) {sorted(skipped_types)} could not be copied onto the "
-            f"snapshot {snapshot_id}: the API cannot re-create them from their own "
-            f"payload"
-        )
-
     snapshot_body = old_body + _transcript_blocks(discussions)
     if snapshot_body:
         published = publish_block_tree(client, snapshot_id, snapshot_body)
         requests.bump(published.request_count)
         if published.partial:
-            notes.append(
+            # D-5's ordering principle, applied to the last thing that can still
+            # be checked: an incomplete snapshot cannot justify the rewrite, and
+            # the rewrite is the irreversible step. The snapshot page stays where
+            # it is — naming it beats deleting it.
+            raise IncompleteSnapshotError(
+                source_id,
                 f"{published.skipped_followups} nested append(s) were skipped while "
-                f"publishing the snapshot {snapshot_id}"
+                f"publishing the snapshot, so part of the old body never reached it",
+                snapshot_page_id=snapshot_id,
             )
 
     # The only legitimate in-library use of the override: this rewrite is exactly
