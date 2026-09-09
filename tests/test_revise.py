@@ -27,7 +27,12 @@ from typing import Any
 
 import pytest
 
-from notion_ops.exceptions import IncompleteSnapshotError
+from notion_ops.exceptions import (
+    IncompleteSnapshotError,
+    NotFoundError,
+    NotionOpsError,
+)
+from notion_ops.exceptions import PermissionError as NotionPermissionError
 from notion_ops.utils.ids import extract_notion_id
 from notion_ops.utils.publish import _children_of, _without_children
 from notion_ops.utils.revise import (
@@ -181,8 +186,15 @@ class ReviseFakeClient:
         parent: dict[str, Any] | None = None,
         drop_append_ids: bool = False,
         children_envelope: Callable[[str, dict[str, Any], int], Any] | None = None,
+        retrieve_errors: dict[str, Exception] | None = None,
     ) -> None:
         self.drop_append_ids = drop_append_ids
+        #: Page id -> the exception ``pages.retrieve`` raises for it. Raised as the
+        #: library would already have mapped it, so a 503 that survived all four
+        #: attempts is a bare ``NotionOpsError`` and a missing page is a
+        #: ``NotFoundError`` — which is the distinction the version walk has to
+        #: make, and could not.
+        self.retrieve_errors = dict(retrieve_errors or {})
         #: Rewrites the well-formed envelope ``blocks.children.list`` would have
         #: returned, so a test can express a *malformed* one — the shape a server
         #: contract violation actually arrives in. Called with the block id, the
@@ -213,6 +225,9 @@ class ReviseFakeClient:
         class _Pages:
             def retrieve(self, *, page_id: str) -> dict[str, Any]:
                 client.calls.append(("pages.retrieve", page_id))
+                error = client.retrieve_errors.get(page_id)
+                if error is not None:
+                    raise error
                 if page_id not in client._pages:
                     # A relation entry always points at a page that exists. An id
                     # the fixture never registered models an ancestor carrying no
@@ -1013,6 +1028,133 @@ class TestVersionChainSnapshotInPlace:
 # ---------------------------------------------------------------------------
 # AC-9 — snapshot-in-place
 # ---------------------------------------------------------------------------
+
+
+class TestVersionWalkFailures:
+    """contract-20: a transient failure must not become a permanent number.
+
+    The walk's `except NotionOpsError` could not tell "this ancestor is gone"
+    from "the workspace is having a bad minute": `map_api_error` sends a 404 to
+    `NotFoundError`, a 403 to `PermissionError` and a 503 that survived all four
+    attempts to a bare `NotionOpsError`, and all three landed in one handler that
+    counted the node and stopped the branch. Measured by the contract seat on a
+    three-deep chain with the middle ancestor answering 503: version 3 healthy,
+    version 2 with the 503, two pages titled `Report (v2)` in one chain.
+
+    The walk runs BEFORE the first write, so raising costs nothing and leaves the
+    workspace untouched; the caller retries in a minute.
+    """
+
+    def _client(self, error: Exception) -> ReviseFakeClient:
+        return ReviseFakeClient(
+            properties={"Name": _title_prop("Report"), "Previous": _relation("a1")},
+            blocks=[_para("body")],
+            retrieve_errors={"a1": error},
+        )
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            NotionOpsError("Notion is unavailable.", code="service_unavailable"),
+            NotionOpsError("Notion is unavailable.", code=None),
+        ],
+        ids=["503-coded", "503-uncoded"],
+    )
+    def test_a_transient_ancestor_read_aborts_before_any_write(self, error):
+        """A 5xx that survived the retries is the one thing that must not be counted.
+
+        It is raised here as the library would already have mapped it -- a bare
+        `NotionOpsError` -- because that is the state the walk actually sees after
+        `_retrieve_page` has spent its four attempts.
+        """
+        client = self._client(error)
+
+        with pytest.raises(NotionOpsError) as caught:
+            revise_page(client, SOURCE, new_markdown="new", schema=ATOMS_LIKE)
+
+        assert caught.value is error
+        assert [c for c in client.calls if c[0] in _WRITE_CALLS] == []
+        assert client.creates == []
+        assert client.updates == []
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            NotFoundError("Page", "a1"),
+            NotionPermissionError(),
+        ],
+        ids=["not-found", "forbidden"],
+    )
+    def test_a_definitive_answer_is_still_counted_not_expanded(self, error):
+        """404 and 403 are answers about the ancestor, not about the workspace.
+
+        A trashed ancestor still retrieves and still expands, so these two mean
+        the page is genuinely out of reach -- countable, and not worth failing a
+        revision over. The behaviour rev2 documented is preserved exactly.
+        """
+        client = self._client(error)
+
+        result = revise_page(client, SOURCE, new_markdown="new", schema=ATOMS_LIKE)
+
+        assert result.version == 2
+        assert client.title_of(SOURCE_ID) == "Report (v2)"
+
+
+class TestCarriedRelationTruncation:
+    """contract-19: the one relation site rev2's truncation guard did not cover.
+
+    `_carried_properties` copies `{kind: prop[kind]}` verbatim for every name in
+    `carry_properties`, and a page-object relation is capped at 25 entries with
+    the remainder flagged by `has_more`. In new-canonical mode the truncated copy
+    lands on the page that BECOMES canonical while the original is stamped
+    `Archived`, so entries 26+ are dropped from the live page and, through each
+    dual inverse, the pages at the other end never learn about the new canonical
+    page at all. Same rule rev2 established for the chain relations, at the site
+    it did not sweep.
+    """
+
+    @pytest.mark.parametrize("mode", [NEW_CANONICAL, SNAPSHOT_IN_PLACE])
+    def test_a_truncated_carried_relation_refuses_before_any_write(self, mode):
+        client = ReviseFakeClient(
+            properties={
+                "Name": _title_prop("Report"),
+                "Previous": _relation(),
+                "Action Item": _relation(*(f"ai-{i}" for i in range(25)), has_more=True),
+            },
+            blocks=[_para("body")],
+        )
+        before = client.block_ids(SOURCE_ID)
+
+        with pytest.raises(ValueError) as caught:
+            revise_page(client, SOURCE, new_markdown="new", schema=ATOMS_LIKE, mode=mode)
+
+        assert "Action Item" in str(caught.value)
+        assert [c for c in client.calls if c[0] in _WRITE_CALLS] == []
+        assert client.block_ids(SOURCE_ID) == before
+        assert client.creates == []
+        assert client.updates == []
+
+    @pytest.mark.parametrize("mode", [NEW_CANONICAL, SNAPSHOT_IN_PLACE])
+    def test_an_untruncated_carried_relation_is_carried_whole(self, mode):
+        """The guard refuses truncation, not relations."""
+        client = ReviseFakeClient(
+            properties={
+                "Name": _title_prop("Report"),
+                "Previous": _relation(),
+                "Action Item": _relation("ai-1", "ai-2"),
+            },
+            blocks=[_para("body")],
+        )
+
+        result = revise_page(
+            client, SOURCE, new_markdown="new", schema=ATOMS_LIKE, mode=mode
+        )
+
+        carried = client.relation_of(
+            result.canonical_page_id if mode == NEW_CANONICAL else result.archived_page_id,
+            "Action Item",
+        )
+        assert carried == ["ai-1", "ai-2"]
 
 
 class TestSnapshotInPlace:

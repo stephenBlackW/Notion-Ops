@@ -49,9 +49,11 @@ from notion_client import APIResponseError
 
 from notion_ops.exceptions import (
     IncompleteSnapshotError,
+    NotFoundError,
     NotionOpsError,
     map_api_error,
 )
+from notion_ops.exceptions import PermissionError as NotionPermissionError
 from notion_ops.operations.comments import Discussion, list_discussions
 from notion_ops.utils.ids import extract_notion_id
 from notion_ops.utils.markdown import markdown_to_blocks
@@ -341,9 +343,27 @@ def _version_number(
     Counting the **transitive** ancestor set is correct for both shapes: it is the
     chain length for a leaf, and the snapshot count for a hub. The walk costs one
     read per ancestor, visits no page twice (``seen``), and stops at
-    ``_MAX_CHAIN_DEPTH``. An ancestor that cannot be read is counted where it
-    stands and not expanded — a version number is not worth failing a revision
-    over, and undercounting loudly beats renumbering the chain.
+    ``_MAX_CHAIN_DEPTH``.
+
+    **Which unreadable ancestors are counted.** Exactly two:
+    :class:`~notion_ops.exceptions.NotFoundError` (404) and
+    :class:`~notion_ops.exceptions.PermissionError` (403). Both are answers *about
+    the ancestor* — it is gone, or it is out of reach — and neither is worth
+    failing a revision over, so the node is counted where it stands and its branch
+    is not expanded. Note that an archived ancestor is not either of these: an
+    ``in_trash`` page still retrieves and still expands.
+
+    Everything else — a 429, a 5xx that survived all four attempts, a network
+    failure — **raises**. A transient condition must not become a permanent
+    number: swallowing it undercounts the chain and stamps a second page with a
+    version another page already has (measured: a 503 mid-chain turned version 3
+    into a second ``Report (v2)``). This walk runs *before the first write*, so
+    raising leaves the workspace untouched and the caller free to retry in a
+    minute (nops-cycle-3 rev4, contract-20).
+
+    Raises:
+        NotionOpsError: An ancestor read failed for a reason that may not be
+            permanent.
     """
     if not predecessor_property:
         return 1
@@ -368,10 +388,10 @@ def _version_number(
             break
         try:
             ancestor = _retrieve_page(client, node)
-        except NotionOpsError as e:
+        except (NotFoundError, NotionPermissionError) as e:
             logger.warning(
-                "Could not read %s while deriving the version number (%s); counting "
-                "it and stopping that branch",
+                "%s is gone or out of reach while deriving the version number (%s); "
+                "counting it and stopping that branch",
                 node,
                 e,
             )
@@ -410,12 +430,24 @@ def _parent_payload(parent: str | None, page: dict[str, Any]) -> dict[str, Any]:
 def _carried_properties(
     properties: dict[str, Any],
     names: tuple[str, ...],
+    page_id: str,
 ) -> dict[str, Any]:
     """The subset of *properties* named by *names*, in API write shape.
 
     A name absent from the source is skipped rather than written as null, and a
     computed type is skipped because Notion rejects it on write — which would
     fail the whole page creation over a field the caller never meant to set.
+
+    A **relation** is refused when the page object could only show us part of it.
+    Copying a truncated array is the same defect read-modify-write has, one site
+    along: in new-canonical mode the copy lands on the page that *becomes*
+    canonical while the original is stamped ``Archived``, so entries past the
+    25-entry cap are dropped from the live page and, through each dual inverse,
+    the pages at the other end never learn about the new canonical page at all
+    (nops-cycle-3 rev4, contract-19).
+
+    Raises:
+        ValueError: A carried relation is truncated. Raised before any write.
     """
     carried: dict[str, Any] = {}
     for name in names:
@@ -428,6 +460,8 @@ def _carried_properties(
         if kind in _COMPUTED_PROPERTY_TYPES:
             logger.debug("Not carrying computed property %r (%s) to the successor", name, kind)
             continue
+        if kind == "relation":
+            _reject_truncated_relation(properties, name, page_id)
         carried[name] = {kind: prop[kind]}
     return carried
 
@@ -681,14 +715,20 @@ def revise_page(
             content in either of them; an unknown ``mode``;
             ``mode="snapshot-in-place"`` without ``schema.predecessor_property``
             (which would orphan the snapshot); a relation this call would extend
-            that the page object returned truncated; or a source page whose parent
-            cannot be derived.
+            or carry that the page object returned truncated; or a source page
+            whose parent cannot be derived.
         NotFoundError: ``page_id`` cannot be read.
+        NotionOpsError: An ancestor read failed transiently while the version was
+            being derived — a 429, a 5xx that survived every attempt, a network
+            failure. The walk runs before the first write, so nothing has changed
+            and the call can simply be retried; counting the ancestor instead
+            would stamp a version number another page in the chain already has.
         IncompleteSnapshotError: Snapshot mode only, and always **before** the
-            in-place rewrite — the page is left untouched. Raised when the source
-            carries a block type the API cannot re-create, or when the snapshot's
-            own publish came back partial. Import it from
-            ``notion_ops.exceptions``; it is a ``NotionOpsError``.
+            in-place rewrite — the page is left untouched. Raised when the old
+            body could not be read in full, when the source carries a block type
+            the API cannot re-create, or when the snapshot's own publish came back
+            partial. Import it from ``notion_ops.exceptions``; it is a
+            ``NotionOpsError``.
         OversizedContentError: Propagated from the markdown conversion.
 
     A re-run is **not idempotent** — revising twice legitimately means two
@@ -786,7 +826,9 @@ def _revise_new_canonical(
     Nothing here writes a block on the original page, so its comments keep both
     their text and their anchors — the property ISS-029 lost.
     """
-    successor_properties = _carried_properties(properties, schema.carry_properties)
+    successor_properties = _carried_properties(
+        properties, schema.carry_properties, source_id
+    )
     successor_properties[schema.title_property] = _title_value(title)
     if schema.reason_property and reason:
         successor_properties[schema.reason_property] = _rich_text_value(reason)
@@ -892,7 +934,9 @@ def _revise_snapshot_in_place(
             block_types=tuple(sorted(skipped_types)),
         )
 
-    snapshot_properties = _carried_properties(properties, schema.carry_properties)
+    snapshot_properties = _carried_properties(
+        properties, schema.carry_properties, source_id
+    )
     snapshot_properties.update(_superseded_title_properties(schema, title, version))
 
     snapshot = _create_page(client, new_page_parent, snapshot_properties)
