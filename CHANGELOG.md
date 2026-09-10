@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.2.0] — 2026-09-10
+
+The versioned-revision release. Everything below was developed through the AOS dev-cycle harness against a live workspace (nops-cycle-2, nops-housekeeping-B, nops-cycle-3); the library stays workspace-agnostic — every property name, status value and data-source id is a caller-supplied parameter, and the test suite scans the package for workspace string constants.
+
 ### Added
 - **Versioned revision (`revise_page`, closes AOS ISS-029).** Publish new content
   for a page as a **new version** instead of rewriting the page in place, so the
@@ -44,6 +50,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   **Migration:** if you republish pages people comment on, either switch to
   `revise_page` or pass `allow_destructive=True` where the loss is intended.
+
+### Added (carried from the 2026-06-04 sprint; landed on `main` in PR #6 without a changelog entry)
+- **Minimal-write, atomic-safe republish (`nops-cycle-2`, closes nops-cycle-1-HL-1/HL-2).** `republish_block_tree` / `republish_markdown` are no longer clear-then-publish. A recursive, id-free content hash (rich_text and non-default annotations normalised so the API shape compares equal to the `markdown_to_blocks` shape) gives a zero-write no-op on identical content and preserves the ids of the unchanged leading blocks; the new suffix is published **before** the old one is deleted, so an interruption never leaves the page empty and a re-run converges. The diff is a leading-prefix diff: an interior edit rewrites every block after it (the mid-list diff is tracked as nops-cycle-2-HL-1).
+- **`AsyncFileUploads.upload_file` reads off the event loop** via `asyncio.to_thread` (`nops-housekeeping-B`, closes nops-refactor-A-HL-1).
+
+### Changed (carried from the 2026-06-04 sprint)
+- **A 404 on delete is a no-op** (`nops-housekeeping-B`, closes nops-cycle-1-HL-3): `_delete_block` tolerates an already-archived block (`object_not_found`) during a republish clear instead of aborting mid-clear; any other 4xx still propagates.
+- **`pip-audit` is a blocking CI job** (`nops-housekeeping-B`, closes nops-security-A-HL-1), scoped to the package's own frozen dependency closure (`pip freeze --exclude-editable`) rather than the runner's.
+- **The ruff rule set is selected explicitly** (`E4`, `E7`, `E9`, `F` + `S`). CI installs an unpinned ruff, and ruff 0.16 widened its default selection; `extend-select` had silently started enabling rules the project never chose.
 
 ## [0.1.0] — 2026-06-02
 

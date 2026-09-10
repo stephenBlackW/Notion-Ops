@@ -52,7 +52,7 @@ from notion_ops.utils.publish import (
 from notion_ops.utils.repair import blocks_to_markdown, repair_blocks
 from notion_ops.utils.revise import RevisionResult, RevisionSchema, revise_page
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     # Client
