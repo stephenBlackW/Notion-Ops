@@ -26,7 +26,12 @@ def _load_pyproject() -> dict:
 def test_ruff_enables_bandit_security_rules() -> None:
     cfg = _load_pyproject()
     lint = cfg["tool"]["ruff"]["lint"]
-    assert "S" in lint["extend-select"], (
+    # The rule set is selected explicitly (`select`) since 2026-09-09, when an
+    # unpinned ruff 0.16 widened its defaults and `extend-select` stopped
+    # meaning "defaults + S". Either key enables S; the invariant is that S is
+    # enabled, not which key carries it.
+    enabled = set(lint.get("select", [])) | set(lint.get("extend-select", []))
+    assert "S" in enabled, (
         "ruff S (flake8-bandit) must stay enabled for the library surface "
         "(nops-security-A)."
     )
