@@ -73,10 +73,14 @@ markers = [
 ]
 
 [tool.ruff.lint]
-# extend-select keeps ruff's defaults (E4/E7/E9, F) and adds:
+# The rule set is selected EXPLICITLY rather than extending ruff's defaults:
+# ruff 0.16 widened its default selection (SIM, BLE, DTZ, PYI, YTT, ASYNC, ...)
+# and CI installs an unpinned ruff, so `extend-select` turned 69 pre-existing
+# style hits on main into a red lint job overnight (2026-09-09, PR #7).
+# E4/E7/E9 + F are the historical defaults this project was written against;
 #   S = flake8-bandit (security lint) — nops-security-A scanners-first.
 # Library code is held to S; the existing notion_ops surface is already clean.
-extend-select = ["S"]
+select = ["E4", "E7", "E9", "F", "S"]
 
 [tool.ruff.lint.per-file-ignores]
 # Tests legitimately use `assert` (S101) and other patterns bandit flags in

@@ -87,6 +87,109 @@ class OversizedContentError(NotionOpsError):
         self.preview = preview
 
 
+class DestructiveRepublishError(NotionOpsError):
+    """Raised when a destructive republish targets a page it must not destroy.
+
+    ``republish_block_tree`` converges a page's blocks by deleting the ones that
+    changed, which permanently detaches every comment anchored to them — the
+    Notion API cannot move or re-anchor a comment (ISS-029). So a republish that
+    *would write* refuses by default when the page carries an open discussion, or
+    when the caller's own ``protected`` predicate flags it.
+
+    The message names the page, the trigger and the discussion count, and
+    deliberately carries **no comment text and no client attribute** — a refusal
+    is not a place to leak either.
+
+    Args:
+        page_id: The page the republish targeted.
+        trigger: ``"discussion"`` or ``"protected"``.
+        discussion_count: Open comments found. ``0`` for a ``protected`` refusal,
+            which does not consult the comments endpoint.
+    """
+
+    def __init__(self, page_id: str, trigger: str, discussion_count: int = 0):
+        if trigger == "discussion":
+            why = (
+                f"it carries {discussion_count} open discussion "
+                f"comment(s), whose anchors a republish would destroy"
+            )
+        else:
+            why = "the caller's protected predicate flags it"
+        message = (
+            f"Refusing to republish {page_id}: {why}. "
+            f"Revise it as a new version instead (notion_ops.revise_page), or "
+            f"pass allow_destructive=True to overwrite it anyway."
+        )
+        super().__init__(message, code="destructive_republish")
+        self.page_id = page_id
+        self.trigger = trigger
+        self.discussion_count = discussion_count
+
+
+class IncompleteSnapshotError(NotionOpsError):
+    """Raised when a snapshot cannot faithfully carry a page's old body.
+
+    ``revise_page(mode="snapshot-in-place")`` rewrites the hub page destructively,
+    so the snapshot is the **only** copy of what was there. A copy known to be
+    incomplete therefore cannot justify the rewrite, and the rewrite is refused
+    *before* it happens: the page is left exactly as it was — blocks, anchors and
+    all — and the caller decides what to do next (revise in ``new-canonical``
+    mode, move the offending blocks by hand, or accept the loss by some route that
+    says so out loud).
+
+    Three conditions raise it, in the order the copy meets them:
+
+    - the read of the old body came back **truncated or unusable** — a page of
+      children reporting ``has_more`` with no cursor to follow it with, or an
+      envelope that is not a listing at all. A short listing is *unknown*, not
+      *empty*, and this is the one caller that must never round unknown down: it
+      is about to delete the only other copy (nops-cycle-3 rev4, hostile-22);
+    - the source carries a block type the API cannot re-create from its own
+      payload — ``child_page``, ``child_database``, ``synced_block``,
+      ``unsupported``, ``ai_block``, or a block with no usable ``type`` at all.
+      These matter more than the missing content: deleting a ``child_page`` block
+      trashes the child page and deleting a ``child_database`` block trashes the
+      database, and a hub page is precisely the page shape that holds them;
+    - the snapshot's own publish came back ``partial``, i.e. some nested content
+      never landed on the snapshot.
+
+    Args:
+        page_id: The page that was **not** modified. That is the point of it.
+        reason: Short phrase naming which condition fired.
+        snapshot_page_id: The snapshot, when one had already been created. It is
+            left in place for inspection rather than cleaned up — deleting a page
+            to tidy up after a refusal is the behaviour this module exists to
+            avoid. Delete it by hand if you do not want it.
+        block_types: The uncopyable types found, when that is the reason.
+    """
+
+    def __init__(
+        self,
+        page_id: str,
+        reason: str,
+        *,
+        snapshot_page_id: str | None = None,
+        block_types: tuple[str, ...] = (),
+    ):
+        where = (
+            f" The snapshot {snapshot_page_id} was created and is left in place for "
+            f"inspection."
+            if snapshot_page_id
+            else ""
+        )
+        types = f" Block type(s): {', '.join(block_types)}." if block_types else ""
+        message = (
+            f"Refusing to rewrite {page_id} in place: {reason}, so the snapshot "
+            f"would not be a complete copy of what the rewrite is about to "
+            f"destroy.{types}{where} The page has NOT been modified. Revise it with "
+            f"mode='new-canonical' instead, which destroys nothing."
+        )
+        super().__init__(message, code="incomplete_snapshot")
+        self.page_id = page_id
+        self.reason = reason
+        self.snapshot_page_id = snapshot_page_id
+        self.block_types = block_types
+
 
 def map_api_error(
     error: APIResponseError,

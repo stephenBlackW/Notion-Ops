@@ -8,6 +8,58 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 _Nothing yet._
 
+## [0.2.0] — 2026-09-10
+
+The versioned-revision release. Everything below was developed through the AOS dev-cycle harness against a live workspace (nops-cycle-2, nops-housekeeping-B, nops-cycle-3); the library stays workspace-agnostic — every property name, status value and data-source id is a caller-supplied parameter, and the test suite scans the package for workspace string constants.
+
+### Added
+- **Versioned revision (`revise_page`, closes AOS ISS-029).** Publish new content
+  for a page as a **new version** instead of rewriting the page in place, so the
+  old page keeps its blocks and every comment anchored to them. `RevisionSchema`
+  carries the caller's own property names (every relation/status field defaults to
+  `None`, meaning "skip that step"), so no workspace convention is baked into the
+  library. Two modes: `new-canonical` (the default; the successor becomes the
+  canonical page and the original is retitled `"(vN)"`, status-stamped and linked
+  forward — the only mode that preserves comment anchors) and `snapshot-in-place`
+  (an explicit opt-in for a hub page whose id other pages relate to: it keeps its
+  id and is rewritten, the old body is snapshotted to a `(vN)` page, and the
+  discussion is transcribed onto that snapshot before the first write, because its
+  anchors cannot survive and the API cannot move them). Exported alongside
+  `RevisionSchema` and `RevisionResult`.
+- **`revise_page` refuses rather than guesses, and says so.** Three refusals, all of them *before* the first write, all of them leaving the workspace exactly as it was:
+  - **Snapshot mode reads the old body strictly.** `snapshot-in-place` rewrites the page and keeps only the copy it just made, so a body listing that cannot be shown to be complete now raises `IncompleteSnapshotError` instead of arriving as a shorter list. Refused: a page that reports `has_more` with no `next_cursor`, an envelope that is not an object, a `results` that is not a list, an entry that is not a block object — including a `dict` with no usable `id` or with an `object` that is not `"block"` — and a block whose type body is not an object. A truncated listing is *unknown*, not *empty*, and the caller on the other end of it is about to delete the only other copy. The same reader's **default** is unchanged, and deliberately: `republish_block_tree`'s diff uses it to decide what to *delete*, where a short listing under-deletes and is the conservative answer.
+  - **A carried or extended relation that came back truncated.** Notion caps a relation array in a page object at 25 entries; a relation write is a set operation, so writing that short array back drops the entries past the cap and, through the dual inverse, their other ends. `ValueError`, naming the property. The remedy is to drop that name from `carry_properties`, or to read the full array through the retrieve-page-property endpoint and pass it explicitly.
+  - **A transient failure during the version walk.** The version number is derived by walking the predecessor chain, and only a definitive *not-found* or *forbidden* ends that walk normally. A 429, a 5xx that survived every attempt or a network failure raises instead of being counted as the end of the chain — counting it would stamp a version another page already has.
+- **Retry-After is honoured, and bounded.** A rate-limited request waits the interval the server asked for, from any of the three shapes it can arrive in (a mapped `RateLimitError`, an `httpx.HTTPStatusError`, a raw status-bearing SDK error), floored at `BASE_DELAY` and capped at the new `MAX_RETRY_AFTER` (60s). That ceiling is separate from `MAX_DELAY` (16s), which bounds the blind exponential ladder: a server-specified wait is information the ladder does not have and is worth honouring past 16s, but a header is not a licence to block a caller for an hour.
+- **Read-only comments surface.** `client.comments.list(page_or_block_id)` and
+  `client.comments.has_discussion(...)`, on both the sync and async clients,
+  paginated and retry-wrapped. Note the Notion endpoint returns **un-resolved**
+  comments only, so `has_discussion` means "carries an *open* discussion".
+
+### Changed
+- **`republish_block_tree` / `republish_markdown` refuse a destructive rewrite by
+  default.** Both grow keyword-only `allow_destructive: bool = False` and
+  `protected: Callable[[str], bool] | None = None`, and raise the new
+  `DestructiveRepublishError` when a republish that *would write* targets a page
+  carrying an open discussion, or one the caller's `protected` predicate flags.
+  The check runs **after** the content diff and **before** the first write, so an
+  identical-content no-op is neither refused nor charged a comments request, and
+  `allow_destructive=True` reproduces the previous behaviour exactly. The
+  positional signature is unchanged, so existing call sites still compile; a call
+  site that republishes over a *discussed* page will now raise, which is the fix.
+
+  **Migration:** if you republish pages people comment on, either switch to
+  `revise_page` or pass `allow_destructive=True` where the loss is intended.
+
+### Added (carried from the 2026-06-04 sprint; landed on `main` in PR #6 without a changelog entry)
+- **Minimal-write, atomic-safe republish (`nops-cycle-2`, closes nops-cycle-1-HL-1/HL-2).** `republish_block_tree` / `republish_markdown` are no longer clear-then-publish. A recursive, id-free content hash (rich_text and non-default annotations normalised so the API shape compares equal to the `markdown_to_blocks` shape) gives a zero-write no-op on identical content and preserves the ids of the unchanged leading blocks; the new suffix is published **before** the old one is deleted, so an interruption never leaves the page empty and a re-run converges. The diff is a leading-prefix diff: an interior edit rewrites every block after it (the mid-list diff is tracked as nops-cycle-2-HL-1).
+- **`AsyncFileUploads.upload_file` reads off the event loop** via `asyncio.to_thread` (`nops-housekeeping-B`, closes nops-refactor-A-HL-1).
+
+### Changed (carried from the 2026-06-04 sprint)
+- **A 404 on delete is a no-op** (`nops-housekeeping-B`, closes nops-cycle-1-HL-3): `_delete_block` tolerates an already-archived block (`object_not_found`) during a republish clear instead of aborting mid-clear; any other 4xx still propagates.
+- **`pip-audit` is a blocking CI job** (`nops-housekeeping-B`, closes nops-security-A-HL-1), scoped to the package's own frozen dependency closure (`pip freeze --exclude-editable`) rather than the runner's.
+- **The ruff rule set is selected explicitly** (`E4`, `E7`, `E9`, `F` + `S`). CI installs an unpinned ruff, and ruff 0.16 widened its default selection; `extend-select` had silently started enabling rules the project never chose.
+
 ## [0.1.0] — 2026-06-02
 
 First public **PyPI** release of `notion-ops`, carved out of AgenticOS into the

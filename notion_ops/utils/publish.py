@@ -29,9 +29,18 @@ import hashlib
 import json
 import logging
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from notion_client import APIResponseError
+
+from notion_ops.exceptions import (
+    DestructiveRepublishError,
+    NotionOpsError,
+    map_api_error,
+)
+from notion_ops.operations.comments import list_discussions
 from notion_ops.utils.ids import extract_notion_id
 from notion_ops.utils.markdown import (
     _MAX_BLOCKS_PER_REQUEST,
@@ -39,7 +48,7 @@ from notion_ops.utils.markdown import (
     _estimate_block_size,
     markdown_to_blocks,
 )
-from notion_ops.utils.retry import retry_on_transient
+from notion_ops.utils.retry import retry_on_transient, retry_on_transient_api
 
 logger = logging.getLogger(__name__)
 
@@ -552,34 +561,123 @@ class RepublishResult(PublishResult):
     deleted_count: int = 0
 
 
-def _list_children_blocks(client: Any, block_id: str) -> list[dict[str, Any]]:
+def _list_children_blocks(
+    client: Any,
+    block_id: str,
+    *,
+    strict: bool = False,
+) -> list[dict[str, Any]]:
     """List the full top-level child block dicts currently under *block_id*.
 
     Paginated and retry-wrapped, matching :func:`execute_plan`'s use of the raw
     SDK (``client.api``) so the publisher stays decoupled from the operations
     layer. Returns the API block dicts (id + type + body + ``has_children``),
     which the minimal-write diff needs to compare existing content.
+
+    **One reader, two callers, two opposite conservative directions.** By default
+    a malformed envelope — ``has_more`` with no cursor to follow it with, a
+    response that is not a JSON object, ``results`` that is not a list — is logged
+    or substituted and what was read so far is returned. That is the safe
+    direction for this module's own two call sites, which use the listing to
+    decide what to **delete**: a listing that came back short under-deletes.
+
+    It is the opposite of safe for
+    :func:`~notion_ops.utils.revise._copy_page_body`, where a listing that came
+    back short becomes a *snapshot* that came back short and the destructive
+    rewrite then deletes the original anyway. ``strict=True`` refuses there
+    instead, by the same rule and in the same words
+    :func:`~notion_ops.operations.comments._next_cursor` uses: a truncated
+    listing is *unknown*, not *empty*, and the caller that is about to destroy
+    the only other copy must never round unknown down (nops-cycle-3 rev4,
+    hostile-22).
+
+    Args:
+        client: A duck-typed client exposing ``client.api``.
+        block_id: The block or page whose children to list.
+        strict: Raise :class:`~notion_ops.exceptions.NotionOpsError` (code
+            ``malformed_response``) rather than returning a listing that cannot
+            be shown to be complete. Defaults to ``False``, which is exactly the
+            behaviour every caller had before the keyword existed.
+
+    Raises:
+        NotionOpsError: Only when *strict*, and only on a listing whose
+            completeness cannot be established.
     """
 
-    @retry_on_transient
-    def _list(bid: str, cursor: str | None) -> dict[str, Any]:
+    @retry_on_transient_api
+    def _request(bid: str, cursor: str | None) -> Any:
         params: dict[str, Any] = {"block_id": bid, "page_size": 100}
         if cursor:
             params["start_cursor"] = cursor
-        result = client.api.blocks.children.list(**params)
-        return result if isinstance(result, dict) else {}
+        return client.api.blocks.children.list(**params)
+
+    def _list(bid: str, cursor: str | None) -> Any:
+        """The request, retried on a transient status and mapped on the way out.
+
+        The mapping is deliberately *outside* the retry wrapper. A mapped 503 is a
+        bare ``NotionOpsError`` carrying Notion's body text, and no predicate can
+        recognise that as transient — mapping inside turns four attempts into one,
+        which is exactly what the old ``retry_on_transient`` did here: its
+        ``_should_retry`` cannot see a coded SDK 503 at all, so the read this
+        module's strictest caller depends on got one attempt where the contract
+        promises four (nops-cycle-3 rev6, hostile-42/contract-32).
+
+        Mapping at all is the other half: an unmapped ``APIResponseError`` is not
+        a :class:`NotionOpsError`, so it sails straight past
+        ``_revise_snapshot_in_place``'s ``except NotionOpsError`` fold and reaches
+        a caller whose ``Raises:`` never named an SDK type (hostile-43).
+        """
+        try:
+            return _request(bid, cursor)
+        except APIResponseError as e:
+            raise map_api_error(e, resource_type="Block", resource_id=bid) from e
+
+    def _unusable(what: str) -> NotionOpsError:
+        return NotionOpsError(
+            f"blocks.children.list returned {what} for {block_id}: the child "
+            f"listing is unusable, and treating it as an empty listing would "
+            f"report a page with nothing on it",
+            code="malformed_response",
+        )
 
     blocks: list[dict[str, Any]] = []
     cursor: str | None = None
     while True:
-        response = _list(block_id, cursor)
-        for block in response.get("results", []) or []:
-            if block.get("id"):
-                blocks.append(block)
+        raw = _list(block_id, cursor)
+        if not isinstance(raw, dict):
+            if strict:
+                raise _unusable(f"a {type(raw).__name__} rather than a list envelope")
+            raw = {}
+        response: dict[str, Any] = raw
+        results = response.get("results")
+        if strict and not isinstance(results, list):
+            raise _unusable("an envelope with no usable 'results'")
+        for block in results or []:
+            if strict and not isinstance(block, dict):
+                raise _unusable(f"a {type(block).__name__} where a block object belongs")
+            kind = block.get("object")
+            if strict and kind is not None and kind != "block":
+                raise _unusable(f"an entry whose 'object' is {kind!r} where a block object belongs")
+            if not block.get("id"):
+                if strict:
+                    raise _unusable("a block object with no id")
+                # The default drops it, and must: the two callers on this path are
+                # diffing to decide what to delete, and an entry with no id is one
+                # they cannot delete and must not guess at.
+                continue
+            blocks.append(block)
         if not response.get("has_more"):
             break
         cursor = response.get("next_cursor")
         if not cursor:
+            if strict:
+                raise NotionOpsError(
+                    f"blocks.children.list reported has_more=True but returned no "
+                    f"next_cursor for {block_id}: the child listing is truncated, "
+                    f"and what was read so far cannot be reported as the whole "
+                    f"page",
+                    code="malformed_response",
+                )
             logger.warning(
                 "blocks.children.list reported has_more=True but returned no "
                 "next_cursor for %s; stopping pagination. The child listing may "
@@ -788,10 +886,52 @@ def _delete_block(client: Any, block_id: str) -> None:
         raise
 
 
+def _guard_destructive_republish(
+    client: Any,
+    page_id: str,
+    protected: Callable[[str], bool] | None,
+) -> None:
+    """Refuse a republish that would destroy something a human is still using.
+
+    Called only when the diff has already established that this republish *would
+    write* — which is the whole design (spec D-5). Two independent reasons:
+
+    - **Correctness.** An identical-content republish is a genuine zero-write
+      no-op (nops-cycle-2, STATE D-91), and AOS re-publishes idempotently all the
+      time; refusing those, or charging each of them a comments request, would
+      break the common path to protect nothing.
+    - **Safety.** Everything checkable is checked before the first irreversible
+      write, which is the ordering lesson ISS-028 made sharp.
+
+    The caller's ``protected`` predicate is consulted first: it is local, so a
+    page the caller already knows is off-limits never costs a network round trip.
+
+    Raises:
+        DestructiveRepublishError: The page is protected, or carries an open
+            discussion.
+        PermissionError: The integration cannot read comments, so the guard
+            cannot clear the page. It fails closed — refusing to answer is not
+            the same as answering "no discussion".
+    """
+    if protected is not None and protected(page_id):
+        raise DestructiveRepublishError(page_id, trigger="protected")
+
+    discussions = list_discussions(client, page_id)
+    if discussions:
+        raise DestructiveRepublishError(
+            page_id,
+            trigger="discussion",
+            discussion_count=len(discussions),
+        )
+
+
 def republish_block_tree(
     client: Any,
     parent_id: str,
     blocks: list[dict[str, Any]],
+    *,
+    allow_destructive: bool = False,
+    protected: Callable[[str], bool] | None = None,
     **kwargs: Any,
 ) -> RepublishResult:
     """Idempotently (re)publish *blocks* under *parent_id* with a minimal-write diff.
@@ -824,6 +964,30 @@ def republish_block_tree(
     (Notion still exposes no multi-block transaction, so a duplicate suffix can
     linger after an interruption until the next republish prunes it.)
 
+    **Refusal on a discussed page (nops-cycle-3, closes ISS-029).** Rewriting a
+    block destroys the anchor of every comment attached to it, and the Notion API
+    can neither move a comment nor re-anchor one. So a republish that *would
+    write* refuses by default when the target carries an open discussion, or when
+    the caller's own ``protected`` predicate flags it, raising
+    :class:`~notion_ops.exceptions.DestructiveRepublishError`. Revise such a page
+    as a new version instead (:func:`notion_ops.utils.revise.revise_page`), which
+    leaves the old blocks — and their comments — untouched.
+
+    The refusal is evaluated **after** the content diff and **before** the first
+    write, so an identical-content no-op is never refused and never costs a
+    comments request. ``allow_destructive=True`` restores the pre-cycle behaviour
+    exactly, skipping the check entirely; it is the deliberate escape hatch, and
+    ``revise_page``'s snapshot mode is its only in-library caller.
+
+    Args:
+        allow_destructive: Skip the guard. Use when nothing is anchored to this
+            page's blocks, or when the loss is understood and intended.
+        protected: ``predicate(page_id) -> bool``, receiving the extracted page
+            id. Returning ``True`` refuses. This is where workspace knowledge
+            ("is this page in a data source I protect?") belongs — the library
+            answers only the Notion-native question, "does it carry a
+            discussion?".
+
     ``**kwargs`` are forwarded to :func:`publish_block_tree` (the limit knobs).
     """
     parent = extract_notion_id(parent_id)
@@ -834,6 +998,12 @@ def republish_block_tree(
     prefix_ids = existing_ids[:prefix_len]
     old_suffix_ids = existing_ids[prefix_len:]
     new_suffix = blocks[prefix_len:]
+
+    # The diff now knows whether this call writes at all. Anything non-empty here
+    # means an append and/or a delete is about to happen; both are irreversible.
+    would_write = bool(new_suffix or old_suffix_ids)
+    if would_write and not allow_destructive:
+        _guard_destructive_republish(client, parent, protected)
 
     # Identical content falls through here with empty suffixes: nothing is
     # published and nothing is deleted, and every existing id is kept in the
@@ -864,9 +1034,21 @@ def republish_markdown(
     client: Any,
     parent_id: str,
     markdown: str,
+    *,
+    allow_destructive: bool = False,
+    protected: Callable[[str], bool] | None = None,
     **kwargs: Any,
 ) -> RepublishResult:
-    """Convert *markdown* to blocks and idempotently republish under *parent_id*."""
+    """Convert *markdown* to blocks and idempotently republish under *parent_id*.
+
+    ``allow_destructive`` and ``protected`` are forwarded to
+    :func:`republish_block_tree`; see its docstring for the guard's contract.
+    """
     return republish_block_tree(
-        client, parent_id, markdown_to_blocks(markdown), **kwargs
+        client,
+        parent_id,
+        markdown_to_blocks(markdown),
+        allow_destructive=allow_destructive,
+        protected=protected,
+        **kwargs,
     )

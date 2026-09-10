@@ -8,6 +8,7 @@ from notion_client import AsyncClient, Client
 from notion_ops.exceptions import AuthenticationError
 from notion_ops.models.page import Page
 from notion_ops.operations.blocks import AsyncBlockOperations, BlockOperations
+from notion_ops.operations.comments import AsyncCommentOperations, CommentOperations
 from notion_ops.operations.data_sources import AsyncDataSourceOperations, DataSourceOperations
 from notion_ops.operations.databases import AsyncDatabaseOperations, DatabaseOperations
 from notion_ops.operations.file_uploads import AsyncFileUploads, FileUploads
@@ -90,6 +91,7 @@ class NotionOps:
         self.blocks = BlockOperations(self)
         self.users = UserOperations(self)
         self.file_uploads = FileUploads(self)
+        self.comments = CommentOperations(self)
 
     @property
     def api(self) -> Client:
@@ -201,6 +203,7 @@ class AsyncNotionOps:
         self.data_sources = AsyncDataSourceOperations(self)
         self.blocks = AsyncBlockOperations(self)
         self.users = AsyncUserOperations(self)
+        self.comments = AsyncCommentOperations(self)
         # Async file uploads: httpx.AsyncClient-backed parity with the sync
         # client so `await client.file_uploads.upload_file(...)` does not block
         # the event loop on a synchronous multipart POST (audit F3).

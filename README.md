@@ -53,6 +53,8 @@ for page in results.pages:
 - **Pagination Helpers**: Automatic handling of paginated results
 - **Rich Text Utilities**: Convert between plain text, rich text, and markdown
 - **Limit-Aware Publishing**: Publish Markdown or arbitrarily-nested block trees in the minimum number of requests, automatically respecting Notion's 2-level inline-nesting cap, the 100-children-per-request limit, >100-row table splitting, and payload-size limits — no manual batching
+- **Versioned Revision**: Change what a published page says without destroying the discussion on it — `revise_page` creates a linked successor and leaves the original's blocks (and their comment anchors) untouched
+- **A Guard on the Destructive Path**: `republish_*` refuses a page carrying an open discussion unless you say otherwise, because a rewritten block takes its anchored comments with it and Notion's API cannot put them back
 
 ## API Reference
 
@@ -219,10 +221,10 @@ blocks = markdown_to_blocks(some_markdown)
 publish_block_tree(client, "page_id", blocks)
 
 # Idempotent republish: re-running refreshes the page instead of duplicating it.
-# Clears the existing top-level children, then publishes the new tree — exactly
-# what you want when re-publishing a report/atom. Content is idempotent; block
-# ids are not stable (cleared blocks are archived + recreated), and the clear +
-# publish are not a single transaction.
+# A content diff leaves the unchanged leading blocks (and their ids) in place and
+# rewrites only the divergent suffix, so identical content is a genuine zero-write
+# no-op. The new suffix is appended before the old one is deleted, so an
+# interruption never leaves the page empty.
 from notion_ops import republish_markdown
 result = republish_markdown(client, "page_id", "# Report (v2)\n\nupdated body")
 print(result.deleted_count, result.request_count)
@@ -230,6 +232,71 @@ print(result.deleted_count, result.request_count)
 
 `PageTemplate` publishes its body through the same path, so templated pages get
 the same limit-handling automatically.
+
+### Revising a page people have commented on
+
+A republish converges a page by deleting the blocks that changed — and a deleted
+block takes every comment anchored to it with it. Notion's API can neither move a
+comment nor re-anchor one, so the mapping from a review comment to the line it was
+about is destroyed and cannot be restored. `republish_*` therefore **refuse** a
+page carrying an open discussion, and `revise_page` is the way through.
+
+```python
+from notion_ops import NotionOps, RevisionSchema, revise_page
+
+client = NotionOps()
+
+# The property names are yours; every relation/status field defaults to None,
+# which means "skip that step". Nothing about any workspace is assumed.
+schema = RevisionSchema(
+    title_property="Name",
+    supersede_property="Next",        # written on the OLD page...
+    predecessor_property="Previous",  # ...the dual relation fills this in itself
+    status_property="Status",
+    archived_status_value="Archived",
+    carry_properties=("Type", "Project"),
+)
+
+result = revise_page(
+    client,
+    "page_id",
+    new_markdown="# Report\n\nthe corrected body",
+    schema=schema,
+    reason="recomputed the Q3 figures",
+)
+result.canonical_page_id  # the successor, carrying the new content
+result.archived_page_id   # the original: retitled "(v2)", blocks and comments intact
+```
+
+"Archived" here is a **status value on a live page**, never Notion's `in_trash`
+flag — trashing the superseded page would take its discussion out of view, which
+is the loss this exists to prevent.
+
+For a *hub* page whose id other pages relate to, `mode="snapshot-in-place"` keeps
+the page's id and snapshots the old body to a `(vN)` page instead. It is an
+explicit opt-in because it is the one path that still detaches the hub page's own
+comment anchors; it reads the discussion before it writes and publishes the
+transcript onto the snapshot, which is as much as the API allows.
+
+```python
+from notion_ops import republish_markdown
+
+# Reserve the destructive path for content nothing is anchored to, or say so:
+republish_markdown(client, "scratch_page", md, allow_destructive=True)
+
+# ...and add your own workspace rule on top of the built-in discussion check:
+republish_markdown(client, page, md, protected=lambda pid: pid in do_not_touch)
+```
+
+### Reading comments
+
+```python
+client.comments.list(page_id)            # -> list[Discussion]
+client.comments.has_discussion(page_id)  # -> bool
+```
+
+The Notion endpoint returns **un-resolved** comments only, so `has_discussion`
+means "carries an *open* discussion", not "has ever been discussed".
 
 ## Property Types
 
